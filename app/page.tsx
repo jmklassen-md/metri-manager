@@ -4,17 +4,15 @@ import React, { useEffect, useMemo, useState } from "react";
 
 type Shift = {
   date: string;       // YYYY-MM-DD
-  shiftName: string;  // extracted from title
-  startTime: string;  // HH:MM 24h local
-  endTime: string;    // HH:MM 24h local
+  shiftName: string;  // parsed shift name
+  startTime: string;  // HH:MM
+  endTime: string;    // HH:MM
   doctor: string;
   location?: string;
   raw?: string;
 };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ----- time helpers --------------------------------------------------------
 
 function toDateTime(date: string, time: string): Date {
   if (!date || !time) return new Date(NaN);
@@ -25,7 +23,7 @@ function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
   const start = toDateTime(shift.date, shift.startTime);
   let end = toDateTime(shift.date, shift.endTime);
 
-  // Overnight shifts (end before start)
+  // Overnight (end earlier than start → next day)
   if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && end <= start) {
     end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
   }
@@ -57,9 +55,7 @@ function findPreviousShiftEnd(
   return ends[0];
 }
 
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
+// ----- main component ------------------------------------------------------
 
 export default function Page() {
   const [shifts, setShifts] = useState<Shift[]>([]);
@@ -68,7 +64,7 @@ export default function Page() {
   const [selectedDoctor, setSelectedDoctor] = useState("");
   const [selectedShiftIndex, setSelectedShiftIndex] = useState("");
 
-  // Fetch shifts from API
+  // Load all shifts
   useEffect(() => {
     fetch("/api/schedule")
       .then((r) => r.json())
@@ -87,7 +83,7 @@ export default function Page() {
       .catch(() => setError("Could not load schedule."));
   }, []);
 
-  // Unique doctor list
+  // Unique doctor names
   const doctors = useMemo(
     () =>
       Array.from(
@@ -100,7 +96,7 @@ export default function Page() {
     [shifts]
   );
 
-  // All shifts for selected doctor
+  // Only this doctor’s shifts
   const doctorShifts = useMemo(
     () =>
       shifts
@@ -117,7 +113,7 @@ export default function Page() {
   const myShift =
     selectedShiftIndex === ""
       ? null
-      : shifts[parseInt(selectedShiftIndex)];
+      : shifts[parseInt(selectedShiftIndex, 10)];
 
   const sameDayShifts = useMemo(() => {
     if (!myShift) return [];
@@ -138,14 +134,14 @@ export default function Page() {
         let myShort = false;
         let theirShort = false;
 
-        // If I take their shift
+        // If YOU take THEIR shift: your previous end → theirStart
         const myPrev = findPreviousShiftEnd(shifts, myDoctor, theirStart);
         if (myPrev) {
           const gap = hoursDiff(theirStart, myPrev);
           if (gap < 12) myShort = true;
         }
 
-        // If they take mine
+        // If THEY take YOUR shift: their previous end → yourStart
         const theirPrev = findPreviousShiftEnd(
           shifts,
           candidate.doctor,
@@ -169,19 +165,19 @@ export default function Page() {
     <div style={{ padding: "1rem", maxWidth: 900, margin: "0 auto" }}>
       <h1>Shift Trade Helper</h1>
       <p>
-        Choose <strong>your name</strong> and then one of{" "}
-        <strong>your shifts</strong>. The app will show other shifts on
-        that day and analyze whether a trade creates a{" "}
-        <strong>SHORT TURNAROUND</strong> (&lt;12 hours).
+        1) Choose <strong>your name</strong>. 2) Choose one of{" "}
+        <strong>your shifts</strong>. The app will show who else works
+        that day and whether a trade creates a{" "}
+        <strong>SHORT TURNAROUND (&lt; 12 hours)</strong> for either doctor.
       </p>
 
       {error && <p style={{ color: "red" }}>{error}</p>}
+
       <hr />
 
-      {/* Doctor dropdown */}
+      {/* Dropdown 1: doctor name */}
       <h2>1. Pick your name</h2>
       {doctors.length === 0 && !error && <p>Loading…</p>}
-
       {doctors.length > 0 && (
         <select
           value={selectedDoctor}
@@ -202,9 +198,8 @@ export default function Page() {
 
       <hr />
 
-      {/* Shift dropdown */}
+      {/* Dropdown 2: this doctor’s shifts only */}
       <h2>2. Pick one of your shifts</h2>
-
       {!selectedDoctor && <p>Select your name first.</p>}
 
       {selectedDoctor && doctorShifts.length === 0 && (
@@ -218,10 +213,9 @@ export default function Page() {
           style={{ width: "100%", padding: "0.5rem" }}
         >
           <option value="">-- Choose a shift --</option>
-
           {doctorShifts.map(({ s, index }) => (
             <option key={index} value={index}>
-              {s.date} — {s.shiftName} — {s.startTime}–{s.endTime}
+              {s.date} — {s.shiftName}
             </option>
           ))}
         </select>
@@ -230,16 +224,14 @@ export default function Page() {
       <hr />
 
       {/* Same-day shifts */}
-      <h2>3. All shifts on this day</h2>
-      {!myShift && <p>Choose a shift to see who else works that day.</p>}
-
+      <h2>Shifts on that day</h2>
+      {!myShift && <p>Choose one of your shifts above.</p>}
       {myShift && (
         <>
           <p>
             <strong>Your shift:</strong> {myShift.date} —{" "}
-            {myShift.shiftName} — {myShift.startTime}–{myShift.endTime}
+            {myShift.shiftName} ({myShift.startTime}–{myShift.endTime})
           </p>
-
           <table
             border={1}
             cellPadding={4}
@@ -270,13 +262,13 @@ export default function Page() {
       <hr />
 
       {/* Trade analysis */}
-      <h2>4. Trade analysis</h2>
+      <h2>Trade analysis</h2>
       {!myShift && (
-        <p>Choose one of your shifts to view possible trades.</p>
+        <p>Select a shift above to see potential trade risks.</p>
       )}
 
       {myShift && tradeOptions.length === 0 && (
-        <p>No other shifts on this day.</p>
+        <p>No other shifts on that day.</p>
       )}
 
       {myShift && tradeOptions.length > 0 && (
