@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useState } from "react";
 
 type Shift = {
   date: string;       // YYYY-MM-DD
-  shiftName: string;  // parsed shift name
+  shiftName: string;  // parsed shift name, e.g. "Surge AM" or "R-N"
   startTime: string;  // HH:MM
   endTime: string;    // HH:MM
   doctor: string;
@@ -12,7 +12,9 @@ type Shift = {
   raw?: string;
 };
 
-// ----- time helpers --------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function toDateTime(date: string, time: string): Date {
   if (!date || !time) return new Date(NaN);
@@ -23,7 +25,7 @@ function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
   const start = toDateTime(shift.date, shift.startTime);
   let end = toDateTime(shift.date, shift.endTime);
 
-  // Overnight (end earlier than start → next day)
+  // Handle overnight shifts (end earlier than start -> next day)
   if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && end <= start) {
     end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
   }
@@ -51,11 +53,33 @@ function findPreviousShiftEnd(
   }
 
   if (!ends.length) return null;
-  ends.sort((a, b) => b.getTime() - a.getTime()); // most recent first
+  ends.sort((a, b) => b.getTime() - a.getTime());
   return ends[0];
 }
 
-// ----- main component ------------------------------------------------------
+function isFutureShift(shift: Shift): boolean {
+  // Use shift start time; if invalid, treat as not future
+  const { start } = getShiftDateTimes(shift);
+  if (isNaN(start.getTime())) return false;
+
+  const now = new Date();
+  return start >= now;
+}
+
+function formatPrettyDate(isoDate: string): string {
+  // isoDate like "2025-11-17"
+  const d = new Date(isoDate + "T00:00:00");
+  if (isNaN(d.getTime())) return isoDate;
+  return d.toLocaleDateString("en-US", {
+    month: "short", // "Nov"
+    day: "numeric", // "17"
+    year: "numeric", // "2025"
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
 
 export default function Page() {
   const [shifts, setShifts] = useState<Shift[]>([]);
@@ -64,7 +88,7 @@ export default function Page() {
   const [selectedDoctor, setSelectedDoctor] = useState("");
   const [selectedShiftIndex, setSelectedShiftIndex] = useState("");
 
-  // Load all shifts
+  // Fetch all shifts from API
   useEffect(() => {
     fetch("/api/schedule")
       .then((r) => r.json())
@@ -73,6 +97,7 @@ export default function Page() {
           setError("Could not load schedule.");
           return;
         }
+        // Sort globally by date + time
         const sorted = [...data].sort((a, b) =>
           `${a.date} ${a.startTime}`.localeCompare(
             `${b.date} ${b.startTime}`
@@ -90,14 +115,14 @@ export default function Page() {
         new Set(
           shifts
             .map((s) => s.doctor.trim())
-            .filter((n) => n && n.length > 0)
+            .filter((name) => name && name.length > 0)
         )
       ).sort((a, b) => a.localeCompare(b)),
     [shifts]
   );
 
-  // Only this doctor’s shifts
-  const doctorShifts = useMemo(
+  // Future shifts for this doctor only
+  const doctorFutureShifts = useMemo(
     () =>
       shifts
         .map((s, index) => ({ s, index }))
@@ -105,7 +130,8 @@ export default function Page() {
           ({ s }) =>
             selectedDoctor &&
             s.doctor.trim().toLowerCase() ===
-              selectedDoctor.trim().toLowerCase()
+              selectedDoctor.trim().toLowerCase() &&
+            isFutureShift(s)
         ),
     [selectedDoctor, shifts]
   );
@@ -134,14 +160,14 @@ export default function Page() {
         let myShort = false;
         let theirShort = false;
 
-        // If YOU take THEIR shift: your previous end → theirStart
+        // If YOU take THEIR shift: your previous end -> theirStart
         const myPrev = findPreviousShiftEnd(shifts, myDoctor, theirStart);
         if (myPrev) {
           const gap = hoursDiff(theirStart, myPrev);
           if (gap < 12) myShort = true;
         }
 
-        // If THEY take YOUR shift: their previous end → yourStart
+        // If THEY take YOUR shift: their previous end -> yourStart
         const theirPrev = findPreviousShiftEnd(
           shifts,
           candidate.doctor,
@@ -166,9 +192,13 @@ export default function Page() {
       <h1>Shift Trade Helper</h1>
       <p>
         1) Choose <strong>your name</strong>. 2) Choose one of{" "}
-        <strong>your shifts</strong>. The app will show who else works
-        that day and whether a trade creates a{" "}
-        <strong>SHORT TURNAROUND (&lt; 12 hours)</strong> for either doctor.
+        <strong>your future shifts</strong> listed as:
+        <br />
+        <em>Nov 17, 2025, Surge AM 08:00–17:00</em>
+        <br />
+        The app will show who else works that day and whether a trade
+        creates a <strong>SHORT TURNAROUND (&lt; 12 hours)</strong> for
+        either doctor.
       </p>
 
       {error && <p style={{ color: "red" }}>{error}</p>}
@@ -198,24 +228,25 @@ export default function Page() {
 
       <hr />
 
-      {/* Dropdown 2: this doctor’s shifts only */}
-      <h2>2. Pick one of your shifts</h2>
+      {/* Dropdown 2: that doctor's future shifts only */}
+      <h2>2. Pick one of your future shifts</h2>
       {!selectedDoctor && <p>Select your name first.</p>}
 
-      {selectedDoctor && doctorShifts.length === 0 && (
-        <p>No shifts found for {selectedDoctor}.</p>
+      {selectedDoctor && doctorFutureShifts.length === 0 && (
+        <p>No future shifts found for {selectedDoctor}.</p>
       )}
 
-      {selectedDoctor && doctorShifts.length > 0 && (
+      {selectedDoctor && doctorFutureShifts.length > 0 && (
         <select
           value={selectedShiftIndex}
           onChange={(e) => setSelectedShiftIndex(e.target.value)}
           style={{ width: "100%", padding: "0.5rem" }}
         >
           <option value="">-- Choose a shift --</option>
-          {doctorShifts.map(({ s, index }) => (
+          {doctorFutureShifts.map(({ s, index }) => (
             <option key={index} value={index}>
-              {s.date} — {s.shiftName}
+              {formatPrettyDate(s.date)}, {s.shiftName}{" "}
+              {s.startTime}-{s.endTime}
             </option>
           ))}
         </select>
@@ -229,8 +260,9 @@ export default function Page() {
       {myShift && (
         <>
           <p>
-            <strong>Your shift:</strong> {myShift.date} —{" "}
-            {myShift.shiftName} ({myShift.startTime}–{myShift.endTime})
+            <strong>Your shift:</strong>{" "}
+            {formatPrettyDate(myShift.date)}, {myShift.shiftName} (
+            {myShift.startTime}–{myShift.endTime})
           </p>
           <table
             border={1}
