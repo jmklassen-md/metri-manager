@@ -33,15 +33,22 @@ function hoursDiff(later: Date, earlier: Date) {
   return (later.getTime() - earlier.getTime()) / (1000 * 60 * 60);
 }
 
+/**
+ * Find the end time of the most recent shift for `doctor` that ends
+ * before `referenceStart`, ignoring any shifts in `ignore`.
+ */
 function findPreviousShiftEnd(
   allShifts: Shift[],
   doctor: string,
-  referenceStart: Date
+  referenceStart: Date,
+  ignore: Shift[] = []
 ): Date | null {
   const ends: Date[] = [];
 
   for (const s of allShifts) {
+    if (ignore.includes(s)) continue; // pretend this shift doesn't exist
     if (s.doctor !== doctor) continue;
+
     const { end } = getShiftDateTimes(s);
     if (!isNaN(end.getTime()) && end < referenceStart) {
       ends.push(end);
@@ -102,14 +109,11 @@ export default function Page() {
     return shifts
       .map((s, index) => ({ s, index }))
       .filter(({ s }) => {
-        // correct doctor?
         const docMatches =
           (s.doctor || "").trim().toLowerCase() ===
           selectedDoctor.trim().toLowerCase();
-
         if (!docMatches) return false;
 
-        // future (or today) only
         const shiftDate = new Date(s.date + "T00:00:00");
         return shiftDate >= today;
       });
@@ -139,18 +143,26 @@ export default function Page() {
         let myShort = false;
         let theirShort = false;
 
-        // If YOU take THEIR shift
-        const myPrev = findPreviousShiftEnd(shifts, myDoctor, theirStart);
+        // Scenario A: YOU take THEIR shift.
+        // We ignore your original shift (myShift) because you'd give it away.
+        const myPrev = findPreviousShiftEnd(
+          shifts,
+          myDoctor,
+          theirStart,
+          [myShift]
+        );
         if (myPrev) {
           const gap = hoursDiff(theirStart, myPrev);
           if (gap < 12) myShort = true;
         }
 
-        // If THEY take YOUR shift
+        // Scenario B: THEY take YOUR shift.
+        // We ignore THEIR original shift (candidate) because they'd give it away.
         const theirPrev = findPreviousShiftEnd(
           shifts,
           candidate.doctor,
-          myStart
+          myStart,
+          [candidate]
         );
         if (theirPrev) {
           const gap = hoursDiff(myStart, theirPrev);
