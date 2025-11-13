@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 
+// Prefer env var, fall back to hardcoded URL
 const ICS_URL =
+  process.env.ICS_URL ||
   "https://calendar.google.com/calendar/ical/9lkc6l8fb3onolrf1fv25juk2uk1jd76%40import.calendar.google.com/public/basic.ics";
 
 function parseICS(icsText: string) {
@@ -111,46 +113,62 @@ function formatTimeLocal(date: Date, timeZone = "America/Winnipeg") {
 }
 
 export async function GET() {
-  const res = await fetch(ICS_URL, { cache: "no-store" });
-  if (!res.ok) {
+  try {
+    const res = await fetch(ICS_URL, { cache: "no-store" });
+
+    if (!res.ok) {
+      return NextResponse.json(
+        {
+          error: "Could not fetch Google Calendar ICS",
+          status: res.status,
+          statusText: res.statusText,
+          url: ICS_URL,
+        },
+        { status: 500 }
+      );
+    }
+
+    const icsText = await res.text();
+    const events = parseICS(icsText);
+
+    const normalized = events.map((ev) => {
+      const dtStartRaw =
+        ev["DTSTART"] ||
+        ev["DTSTART;VALUE=DATE"] ||
+        ev["DTSTART;TZID=America/Chicago"] ||
+        ev["DTSTART;TZID=America/Winnipeg"];
+      const dtEndRaw =
+        ev["DTEND"] ||
+        ev["DTEND;VALUE=DATE"] ||
+        ev["DTEND;TZID=America/Chicago"] ||
+        ev["DTEND;TZID=America/Winnipeg"];
+
+      const startDate = dtStartRaw ? parseICSDate(dtStartRaw) : null;
+      const endDate = dtEndRaw ? parseICSDate(dtEndRaw) : null;
+
+      const summary = ev["SUMMARY"] || "";
+      const location = ev["LOCATION"] || "";
+      const { shiftName, doctor } = parseSummary(summary);
+
+      return {
+        date: startDate ? formatDateLocal(startDate) : "",
+        shiftName,
+        startTime: startDate ? formatTimeLocal(startDate) : "",
+        endTime: endDate ? formatTimeLocal(endDate) : "",
+        doctor,
+        location,
+        raw: summary,
+      };
+    });
+
+    return NextResponse.json(normalized);
+  } catch (err: any) {
     return NextResponse.json(
-      { error: "Could not fetch Google Calendar ICS" },
+      {
+        error: "Exception while fetching ICS",
+        message: String(err?.message || err),
+      },
       { status: 500 }
     );
   }
-
-  const icsText = await res.text();
-  const events = parseICS(icsText);
-
-  const normalized = events.map((ev) => {
-    const dtStartRaw =
-      ev["DTSTART"] ||
-      ev["DTSTART;VALUE=DATE"] ||
-      ev["DTSTART;TZID=America/Chicago"] ||
-      ev["DTSTART;TZID=America/Winnipeg"];
-    const dtEndRaw =
-      ev["DTEND"] ||
-      ev["DTEND;VALUE=DATE"] ||
-      ev["DTEND;TZID=America/Chicago"] ||
-      ev["DTEND;TZID=America/Winnipeg"];
-
-    const startDate = dtStartRaw ? parseICSDate(dtStartRaw) : null;
-    const endDate = dtEndRaw ? parseICSDate(dtEndRaw) : null;
-
-    const summary = ev["SUMMARY"] || "";
-    const location = ev["LOCATION"] || "";
-    const { shiftName, doctor } = parseSummary(summary);
-
-    return {
-      date: startDate ? formatDateLocal(startDate) : "",
-      shiftName,
-      startTime: startDate ? formatTimeLocal(startDate) : "",
-      endTime: endDate ? formatTimeLocal(endDate) : "",
-      doctor,
-      location,
-      raw: summary,
-    };
-  });
-
-  return NextResponse.json(normalized);
 }
