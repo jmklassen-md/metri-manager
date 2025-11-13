@@ -73,6 +73,23 @@ function findPreviousShiftEnd(
   return ends[0];
 }
 
+function formatPreference(contact?: Contact): string {
+  if (!contact) return "No contact info";
+  switch (contact.preferred) {
+    case "email":
+      return "Prefers email";
+    case "sms":
+      return "Prefers SMS";
+    case "either":
+      return "Email or SMS";
+    case "none":
+      if (!contact.email && !contact.phone) return "Prefers not to share";
+      return "Prefers not to share";
+    default:
+      return "No preference set";
+  }
+}
+
 export default function Page() {
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -282,6 +299,21 @@ ${contactLine}
     const otherEmail = otherContact?.email ?? "";
     const myEmailForSend = myEmail;
 
+    // Communicate preference before sending
+    if (otherContact) {
+      if (otherContact.preferred === "sms") {
+        const proceed = window.confirm(
+          `Note: Dr. ${otherName} prefers SMS. Do you still want to start an email?`
+        );
+        if (!proceed) return;
+      } else if (otherContact.preferred === "none") {
+        const proceed = window.confirm(
+          `Note: Dr. ${otherName} prefers not to share contact info.\nYou may want to coordinate in person or via internal messaging.\n\nDo you still want to proceed with an email (if possible)?`
+        );
+        if (!proceed) return;
+      }
+    }
+
     if (otherEmail || myEmailForSend) {
       const to = otherEmail || myEmailForSend;
       const ccParam =
@@ -329,6 +361,21 @@ ${contactLine}
     const otherPhone = otherContact?.phone ?? "";
     const myPhoneForSend = myPhone;
 
+    // Communicate preference before sending
+    if (otherContact) {
+      if (otherContact.preferred === "email") {
+        const proceed = window.confirm(
+          `Note: Dr. ${otherName} prefers email. Do you still want to start an SMS?`
+        );
+        if (!proceed) return;
+      } else if (otherContact.preferred === "none") {
+        const proceed = window.confirm(
+          `Note: Dr. ${otherName} prefers not to share contact info.\nYou may want to coordinate in person or via internal messaging.\n\nDo you still want to proceed with SMS (if possible)?`
+        );
+        if (!proceed) return;
+      }
+    }
+
     if (otherPhone || myPhoneForSend) {
       const to = otherPhone || myPhoneForSend;
       const smsUrl = `sms:${encodeURIComponent(
@@ -367,6 +414,10 @@ ${contactLine}
     setContactSavedMessage("Contact information saved.");
     setTimeout(() => setContactSavedMessage(""), 3000);
   };
+
+  const myPreferenceText = myContact
+    ? formatPreference(myContact)
+    : "No contact info saved for you yet.";
 
   return (
     <div style={{ padding: "1rem", maxWidth: 900, margin: "0 auto" }}>
@@ -415,6 +466,9 @@ ${contactLine}
           <p>
             You are editing contact info for:{" "}
             <strong>Dr. {selectedDoctor}</strong>
+          </p>
+          <p style={{ fontSize: "0.9rem", color: "#555" }}>
+            Your current preference: <strong>{myPreferenceText}</strong>
           </p>
           <div style={{ marginBottom: "0.5rem" }}>
             <label>
@@ -613,7 +667,7 @@ ${contactLine}
           <table
             border={1}
             cellPadding={4}
-            style={{ borderCollapse: "collapse", minWidth: 500 }}
+            style={{ borderCollapse: "collapse", minWidth: 650 }}
           >
             <thead>
               <tr>
@@ -621,50 +675,56 @@ ${contactLine}
                 <th>Doctor</th>
                 <th>Start</th>
                 <th>End</th>
+                <th>Contact preference</th>
                 <th>Turnaround Risk</th>
                 <th>Send offer</th>
               </tr>
             </thead>
             <tbody>
-              {tradeOptions.map((t, i) => (
-                <tr key={i}>
-                  <td>{t.candidate.shiftName}</td>
-                  <td>{t.candidate.doctor}</td>
-                  <td>{t.candidate.startTime}</td>
-                  <td>{t.candidate.endTime}</td>
-                  <td style={{ color: t.hasShort ? "red" : "green" }}>
-                    {t.hasShort
-                      ? `SHORT TURNAROUND ${
-                          t.myShort ? "(for YOU) " : ""
-                        }${t.theirShort ? "(for THEM)" : ""}`
-                      : "OK (≥ 12h each)"}
-                  </td>
-                  <td>
-                    <div
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "0.25rem",
-                      }}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => handleSendEmailOffer(t.candidate)}
-                        style={{ padding: "0.25rem 0.5rem" }}
+              {tradeOptions.map((t, i) => {
+                const otherContact = contacts[t.candidate.doctor];
+                const prefText = formatPreference(otherContact);
+                return (
+                  <tr key={i}>
+                    <td>{t.candidate.shiftName}</td>
+                    <td>{t.candidate.doctor}</td>
+                    <td>{t.candidate.startTime}</td>
+                    <td>{t.candidate.endTime}</td>
+                    <td>{prefText}</td>
+                    <td style={{ color: t.hasShort ? "red" : "green" }}>
+                      {t.hasShort
+                        ? `SHORT TURNAROUND ${
+                            t.myShort ? "(for YOU) " : ""
+                          }${t.theirShort ? "(for THEM)" : ""}`
+                        : "OK (≥ 12h each)"}
+                    </td>
+                    <td>
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "0.25rem",
+                        }}
                       >
-                        Email / copy
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleSendSmsOffer(t.candidate)}
-                        style={{ padding: "0.25rem 0.5rem" }}
-                      >
-                        SMS / copy
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                        <button
+                          type="button"
+                          onClick={() => handleSendEmailOffer(t.candidate)}
+                          style={{ padding: "0.25rem 0.5rem" }}
+                        >
+                          Email / copy
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSendSmsOffer(t.candidate)}
+                          style={{ padding: "0.25rem 0.5rem" }}
+                        >
+                          SMS / copy
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
