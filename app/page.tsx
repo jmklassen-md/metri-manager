@@ -4,9 +4,9 @@ import React, { useEffect, useMemo, useState } from "react";
 
 type Shift = {
   date: string;       // YYYY-MM-DD
-  shiftName: string;  // parsed shift name, e.g. "Surge AM" or "R-N"
-  startTime: string;  // HH:MM
-  endTime: string;    // HH:MM
+  shiftName: string;  // parsed from ICS summary
+  startTime: string;  // HH:MM 24h
+  endTime: string;    // HH:MM 24h
   doctor: string;
   location?: string;
   raw?: string;
@@ -62,8 +62,8 @@ function formatPrettyDate(isoDate: string): string {
   const d = new Date(isoDate + "T00:00:00");
   if (isNaN(d.getTime())) return isoDate;
   return d.toLocaleDateString("en-US", {
-    month: "short", // "Nov"
-    day: "numeric", // "17"
+    month: "short",  // "Nov"
+    day: "numeric",  // "17"
     year: "numeric", // "2025"
   });
 }
@@ -99,7 +99,7 @@ export default function Page() {
       .catch(() => setError("Could not load schedule."));
   }, []);
 
-  // Unique doctor names for dropdown 1
+  // Unique doctor names for dropdown #1
   const doctors = useMemo(
     () =>
       Array.from(
@@ -112,7 +112,7 @@ export default function Page() {
     [shifts]
   );
 
-  // ALL shifts (past + future) for this doctor only
+  // All shifts for the selected doctor (this will feed dropdown #2)
   const doctorShifts = useMemo(
     () =>
       shifts
@@ -182,11 +182,15 @@ export default function Page() {
       <h1>Shift Trade Helper</h1>
       <p>
         1) Choose <strong>your name</strong>. 2) Choose one of{" "}
-        <strong>your shifts</strong> listed as:
+        <strong>your shifts</strong>, shown like:
+      </p>
+      <p style={{ fontStyle: "italic", marginLeft: "1rem" }}>
+        Nov 17, 2025, Surge AM 08:00–17:00
         <br />
-        <em>Nov 17, 2025, Surge AM 08:00–17:00</em>
-        <br />
-        The app will show who else works that day and whether a trade
+        Nov 18, 2025, RAZ-N 23:30–09:30
+      </p>
+      <p>
+        Then the app will show who else works that day and whether a trade
         creates a <strong>SHORT TURNAROUND (&lt; 12 hours)</strong> for
         either doctor.
       </p>
@@ -218,7 +222,7 @@ export default function Page() {
 
       <hr />
 
-      {/* Dropdown 2: that doctor's shifts only, formatted nicely */}
+      {/* Dropdown 2: this doctor's shifts ONLY, formatted with date + name + times */}
       <h2>2. Pick one of your shifts</h2>
       {!selectedDoctor && <p>Select your name first.</p>}
 
