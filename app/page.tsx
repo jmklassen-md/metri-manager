@@ -233,7 +233,8 @@ ${contactLine}
           ? `&cc=${encodeURIComponent(myEmail)}`
           : "";
       const subject = encodeURIComponent(
-        `SAME DAY SHIFT TRADE OFFER from ${meName}`
+  `SAME DAY SHIFT TRADE OFFER from ${meName}`
+);
       );
       const body = encodeURIComponent(message);
       const mailto = `mailto:${encodeURIComponent(
