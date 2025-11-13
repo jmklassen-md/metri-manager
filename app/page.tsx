@@ -57,15 +57,6 @@ function findPreviousShiftEnd(
   return ends[0];
 }
 
-function isFutureShift(shift: Shift): boolean {
-  // Use shift start time; if invalid, treat as not future
-  const { start } = getShiftDateTimes(shift);
-  if (isNaN(start.getTime())) return false;
-
-  const now = new Date();
-  return start >= now;
-}
-
 function formatPrettyDate(isoDate: string): string {
   // isoDate like "2025-11-17"
   const d = new Date(isoDate + "T00:00:00");
@@ -108,7 +99,7 @@ export default function Page() {
       .catch(() => setError("Could not load schedule."));
   }, []);
 
-  // Unique doctor names
+  // Unique doctor names for dropdown 1
   const doctors = useMemo(
     () =>
       Array.from(
@@ -121,8 +112,8 @@ export default function Page() {
     [shifts]
   );
 
-  // Future shifts for this doctor only
-  const doctorFutureShifts = useMemo(
+  // ALL shifts (past + future) for this doctor only
+  const doctorShifts = useMemo(
     () =>
       shifts
         .map((s, index) => ({ s, index }))
@@ -130,8 +121,7 @@ export default function Page() {
           ({ s }) =>
             selectedDoctor &&
             s.doctor.trim().toLowerCase() ===
-              selectedDoctor.trim().toLowerCase() &&
-            isFutureShift(s)
+              selectedDoctor.trim().toLowerCase()
         ),
     [selectedDoctor, shifts]
   );
@@ -192,7 +182,7 @@ export default function Page() {
       <h1>Shift Trade Helper</h1>
       <p>
         1) Choose <strong>your name</strong>. 2) Choose one of{" "}
-        <strong>your future shifts</strong> listed as:
+        <strong>your shifts</strong> listed as:
         <br />
         <em>Nov 17, 2025, Surge AM 08:00–17:00</em>
         <br />
@@ -228,22 +218,22 @@ export default function Page() {
 
       <hr />
 
-      {/* Dropdown 2: that doctor's future shifts only */}
-      <h2>2. Pick one of your future shifts</h2>
+      {/* Dropdown 2: that doctor's shifts only, formatted nicely */}
+      <h2>2. Pick one of your shifts</h2>
       {!selectedDoctor && <p>Select your name first.</p>}
 
-      {selectedDoctor && doctorFutureShifts.length === 0 && (
-        <p>No future shifts found for {selectedDoctor}.</p>
+      {selectedDoctor && doctorShifts.length === 0 && (
+        <p>No shifts found for {selectedDoctor}.</p>
       )}
 
-      {selectedDoctor && doctorFutureShifts.length > 0 && (
+      {selectedDoctor && doctorShifts.length > 0 && (
         <select
           value={selectedShiftIndex}
           onChange={(e) => setSelectedShiftIndex(e.target.value)}
           style={{ width: "100%", padding: "0.5rem" }}
         >
           <option value="">-- Choose a shift --</option>
-          {doctorFutureShifts.map(({ s, index }) => (
+          {doctorShifts.map(({ s, index }) => (
             <option key={index} value={index}>
               {formatPrettyDate(s.date)}, {s.shiftName}{" "}
               {s.startTime}-{s.endTime}
