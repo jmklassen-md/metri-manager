@@ -1,116 +1,116 @@
 import { NextResponse } from "next/server";
 
-// Prefer env var, fall back to hardcoded URL
+type Shift = {
+  date: string;      // YYYY-MM-DD
+  shiftName: string; // e.g. "Surge AM", "R-N", "RAZ-PM"
+  startTime: string; // "08:00"
+  endTime: string;   // "17:00"
+  doctor: string;
+  location?: string;
+  raw?: string;      // original SUMMARY line for debugging
+};
+
 const ICS_URL =
   process.env.ICS_URL ||
-  "https://calendar.google.com/calendar/ical/9lkc6l8fb3onolrf1fv25juk2uk1jd76%40import.calendar.google.com/public/basic.ics";
+  "https://app.metricaid.com/sync/key/e0c26420-5788-47d5-a160-6d647d20ad0a?t=1762461578&a=shifts&b=true&c=true&d=true&e=true&f=true&g=false&h=true&j=234&i=false&sendEmail=true";
 
-function parseICS(icsText: string) {
-  const events: Record<string, string>[] = [];
-  const lines = icsText.split(/\r?\n/);
-  let current: Record<string, string> | null = null;
+// ------------ ICS Parsing Helpers ------------------------------------------
 
-  for (const line of lines) {
-    if (line === "BEGIN:VEVENT") {
-      current = {};
-    } else if (line === "END:VEVENT") {
-      if (current) events.push(current);
-      current = null;
-    } else if (current) {
-      const idx = line.indexOf(":");
-      if (idx > -1) {
-        const key = line.slice(0, idx);
-        const val = line.slice(idx + 1);
-        current[key] = val;
-      }
-    }
-  }
-  return events;
+function parseICSDateTime(value: string): Date {
+  // value like: 20251117T153000Z or 20251117T153000
+  const clean = value.replace("Z", "");
+  const m = clean.match(/^(\d{4})(\d{2})(\d{2})T?(\d{2})(\d{2})(\d{2})?$/);
+  if (!m) return new Date(NaN);
+  const [, y, mo, d, h, mi, s = "00"] = m;
+  return new Date(
+    Number(y),
+    Number(mo) - 1,
+    Number(d),
+    Number(h),
+    Number(mi),
+    Number(s)
+  );
 }
 
-function parseSummary(summary: string) {
+function getProp(lines: string[], prefix: string): string {
+  const line = lines.find((l) => l.startsWith(prefix));
+  if (!line) return "";
+  const idx = line.indexOf(":");
+  if (idx === -1) return "";
+  return line.slice(idx + 1).trim();
+}
+
+function parseSummary(summary: string): { shiftName: string; doctor: string } {
+  // Example summary:
+  // "SBH - ED - R-PM2 - 15:30-00:30 - Peters (Day 2/2)"
+  // "SBH - ED - Surge-AM - 08:00-17:00 - Klassen"
   const parts = summary.split(" - ").map((p) => p.trim());
-  let shiftName = "";
+  let shiftName = summary.trim();
   let doctor = "";
 
-  if (parts.length >= 3) {
-    shiftName = parts[2];
-  } else {
-    shiftName = summary.trim();
-  }
-
   if (parts.length >= 5) {
-    doctor = parts[4].replace(/\(.*?\)\s*$/, "").trim();
+    // [0]=SBH, [1]=ED, [2]=Shift name, [3]=time block, [4]=Doctor (+ maybe Day info)
+    shiftName = parts[2];
+    doctor = parts[4].replace(/\(Day.*\)/, "").trim();
+  } else if (parts.length >= 2) {
+    // Fallback: take second last as shift, last as doctor
+    shiftName = parts[parts.length - 2];
+    doctor = parts[parts.length - 1].replace(/\(Day.*\)/, "").trim();
   }
 
   return { shiftName, doctor };
 }
 
-function parseICSDate(ics: string): Date | null {
-  if (!ics) return null;
+function parseICSText(text: string): Shift[] {
+  const events: Shift[] = [];
 
-  if (ics.endsWith("Z")) {
-    const iso =
-      ics.slice(0, 4) +
-      "-" +
-      ics.slice(4, 6) +
-      "-" +
-      ics.slice(6, 8) +
-      "T" +
-      ics.slice(9, 11) +
-      ":" +
-      ics.slice(11, 13) +
-      ":" +
-      ics.slice(13, 15) +
-      "Z";
-    return new Date(iso);
+  const chunks = text.split("BEGIN:VEVENT").slice(1); // drop header chunk
+
+  for (const chunk of chunks) {
+    const block = "BEGIN:VEVENT" + chunk;
+    const lines = block
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith("BEGIN:VEVENT") && !l.startsWith("END:VEVENT"));
+
+    const dtStartLine = lines.find((l) => l.startsWith("DTSTART"));
+    const dtEndLine = lines.find((l) => l.startsWith("DTEND"));
+    const summary = getProp(lines, "SUMMARY");
+    const location = getProp(lines, "LOCATION");
+
+    if (!dtStartLine || !dtEndLine || !summary) continue;
+
+    const startValue = dtStartLine.split(":").slice(-1)[0];
+    const endValue = dtEndLine.split(":").slice(-1)[0];
+
+    const startDate = parseICSDateTime(startValue);
+    const endDate = parseICSDateTime(endValue);
+
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) continue;
+
+    // Use local time for date & HH:MM
+    const dateISO = startDate.toISOString().slice(0, 10);
+    const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+    const startTime = `${pad(startDate.getHours())}:${pad(startDate.getMinutes())}`;
+    const endTime = `${pad(endDate.getHours())}:${pad(endDate.getMinutes())}`;
+
+    const { shiftName, doctor } = parseSummary(summary);
+
+    events.push({
+      date: dateISO,
+      shiftName,
+      startTime,
+      endTime,
+      doctor,
+      location,
+      raw: summary,
+    });
   }
 
-  if (ics.includes("T")) {
-    const y = ics.slice(0, 4);
-    const m = ics.slice(4, 6);
-    const d = ics.slice(6, 8);
-    const hh = ics.slice(9, 11);
-    const mm = ics.slice(11, 13);
-    const ss = ics.slice(13, 15) || "00";
-    return new Date(`${y}-${m}-${d}T${hh}:${mm}:${ss}`);
-  }
-
-  if (ics.length === 8) {
-    const y = ics.slice(0, 4);
-    const m = ics.slice(4, 6);
-    const d = ics.slice(6, 8);
-    return new Date(`${y}-${m}-${d}T00:00:00`);
-  }
-
-  return null;
+  return events;
 }
 
-function formatDateLocal(date: Date, timeZone = "America/Winnipeg") {
-  const opts: Intl.DateTimeFormatOptions = {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  };
-  const parts = new Intl.DateTimeFormat("en-CA", opts)
-    .formatToParts(date)
-    .reduce((acc, p) => {
-      acc[p.type] = p.value;
-      return acc;
-    }, {} as Record<string, string>);
-  return `${parts.year}-${parts.month}-${parts.day}`;
-}
-
-function formatTimeLocal(date: Date, timeZone = "America/Winnipeg") {
-  const opts: Intl.DateTimeFormatOptions = {
-    timeZone,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  };
-  return new Intl.DateTimeFormat("en-CA", opts).format(date);
-}
+// ------------ API Route -----------------------------------------------------
 
 export async function GET() {
   try {
@@ -118,56 +118,19 @@ export async function GET() {
 
     if (!res.ok) {
       return NextResponse.json(
-        {
-          error: "Could not fetch Google Calendar ICS",
-          status: res.status,
-          statusText: res.statusText,
-          url: ICS_URL,
-        },
+        { error: "Could not fetch ICS", status: res.status },
         { status: 500 }
       );
     }
 
-    const icsText = await res.text();
-    const events = parseICS(icsText);
+    const text = await res.text();
+    const shifts = parseICSText(text);
 
-    const normalized = events.map((ev) => {
-      const dtStartRaw =
-        ev["DTSTART"] ||
-        ev["DTSTART;VALUE=DATE"] ||
-        ev["DTSTART;TZID=America/Chicago"] ||
-        ev["DTSTART;TZID=America/Winnipeg"];
-      const dtEndRaw =
-        ev["DTEND"] ||
-        ev["DTEND;VALUE=DATE"] ||
-        ev["DTEND;TZID=America/Chicago"] ||
-        ev["DTEND;TZID=America/Winnipeg"];
-
-      const startDate = dtStartRaw ? parseICSDate(dtStartRaw) : null;
-      const endDate = dtEndRaw ? parseICSDate(dtEndRaw) : null;
-
-      const summary = ev["SUMMARY"] || "";
-      const location = ev["LOCATION"] || "";
-      const { shiftName, doctor } = parseSummary(summary);
-
-      return {
-        date: startDate ? formatDateLocal(startDate) : "",
-        shiftName,
-        startTime: startDate ? formatTimeLocal(startDate) : "",
-        endTime: endDate ? formatTimeLocal(endDate) : "",
-        doctor,
-        location,
-        raw: summary,
-      };
-    });
-
-    return NextResponse.json(normalized);
+    return NextResponse.json(shifts, { status: 200 });
   } catch (err: any) {
+    console.error("Error in /api/schedule:", err);
     return NextResponse.json(
-      {
-        error: "Exception while fetching ICS",
-        message: String(err?.message || err),
-      },
+      { error: "Failed to load schedule" },
       { status: 500 }
     );
   }
