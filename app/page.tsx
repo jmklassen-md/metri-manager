@@ -113,4 +113,202 @@ export default function Page() {
   const sameDayShifts = useMemo(() => {
     if (!myShift) return [];
     return shifts.filter((s) => s.date === myShift.date);
-  }, [myShift,
+  }, [myShift, shifts]);
+
+  const tradeOptions = useMemo(() => {
+    if (!myShift) return [];
+
+    const { start: myStart } = getShiftDateTimes(myShift);
+    const myDoctor = myShift.doctor;
+
+    return sameDayShifts
+      .filter((s) => s !== myShift)
+      .map((candidate) => {
+        const { start: theirStart } = getShiftDateTimes(candidate);
+
+        let myShort = false;
+        let theirShort = false;
+
+        const myPrev = findPreviousShiftEnd(shifts, myDoctor, theirStart);
+        if (myPrev) {
+          const gap = hoursDiff(theirStart, myPrev);
+          if (gap < 12) myShort = true;
+        }
+
+        const theirPrev = findPreviousShiftEnd(
+          shifts,
+          candidate.doctor,
+          myStart
+        );
+        if (theirPrev) {
+          const gap = hoursDiff(myStart, theirPrev);
+          if (gap < 12) theirShort = true;
+        }
+
+        return {
+          candidate,
+          myShort,
+          theirShort,
+          hasShort: myShort || theirShort,
+        };
+      });
+  }, [myShift, sameDayShifts, shifts]);
+
+  return (
+    <div style={{ padding: "1rem", maxWidth: 900, margin: "0 auto" }}>
+      <h1>Shift Trade Helper</h1>
+      <p>
+        1) Choose <strong>your name</strong>. 2) Choose one of{" "}
+        <strong>your shifts</strong>. Each option shows:
+      </p>
+      <p style={{ fontStyle: "italic", marginLeft: "1rem" }}>
+        2025-11-17 Surge-AM 08:00–17:00
+        <br />
+        2025-11-18 RAZ-N 23:30–09:30
+      </p>
+
+      {error && <p style={{ color: "red" }}>{error}</p>}
+
+      <hr />
+
+      {/* Doctor dropdown */}
+      <h2>1. Pick your name</h2>
+      {doctors.length === 0 && !error && <p>Loading…</p>}
+      {doctors.length > 0 && (
+        <select
+          value={selectedDoctor}
+          onChange={(e) => {
+            setSelectedDoctor(e.target.value);
+            setSelectedShiftIndex("");
+          }}
+          style={{ width: "100%", padding: "0.5rem" }}
+        >
+          <option value="">-- Choose your name --</option>
+          {doctors.map((doc) => (
+            <option key={doc} value={doc}>
+              {doc}
+            </option>
+          ))}
+        </select>
+      )}
+
+      <hr />
+
+      {/* Shift dropdown */}
+      <h2>2. Pick one of your shifts</h2>
+      {!selectedDoctor && <p>Select your name first.</p>}
+
+      {selectedDoctor && doctorShifts.length === 0 && (
+        <p>No shifts found for {selectedDoctor}.</p>
+      )}
+
+      {selectedDoctor && doctorShifts.length > 0 && (
+        <select
+          value={selectedShiftIndex}
+          onChange={(e) => setSelectedShiftIndex(e.target.value)}
+          style={{ width: "100%", padding: "0.5rem" }}
+        >
+          <option value="">-- Choose a shift --</option>
+          {doctorShifts.map(({ s, index }) => {
+            const date = s.date || "????-??-??";
+            const name = s.shiftName || "Unknown";
+            const start = s.startTime || "??:??";
+            const end = s.endTime || "??:??";
+
+            const label = `${date} ${name} ${start}–${end}`;
+
+            return (
+              <option key={index} value={index}>
+                {label}
+              </option>
+            );
+          })}
+        </select>
+      )}
+
+      <hr />
+
+      <h2>Shifts on that day</h2>
+      {!myShift && <p>Choose one of your shifts above.</p>}
+      {myShift && (
+        <>
+          <p>
+            <strong>Your shift:</strong>{" "}
+            {myShift.date} {myShift.shiftName} ({myShift.startTime}–
+            {myShift.endTime})
+          </p>
+          <table
+            border={1}
+            cellPadding={4}
+            style={{ borderCollapse: "collapse" }}
+          >
+            <thead>
+              <tr>
+                <th>Shift</th>
+                <th>Doctor</th>
+                <th>Start</th>
+                <th>End</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sameDayShifts.map((s, i) => (
+                <tr key={i}>
+                  <td>{s.shiftName}</td>
+                  <td>{s.doctor}</td>
+                  <td>{s.startTime}</td>
+                  <td>{s.endTime}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      <hr />
+
+      <h2>Trade analysis</h2>
+      {!myShift && (
+        <p>Select a shift above to see potential trade risks.</p>
+      )}
+
+      {myShift && tradeOptions.length === 0 && (
+        <p>No other shifts on that day.</p>
+      )}
+
+      {myShift && tradeOptions.length > 0 && (
+        <table
+          border={1}
+          cellPadding={4}
+          style={{ borderCollapse: "collapse" }}
+        >
+          <thead>
+            <tr>
+              <th>Candidate Shift</th>
+              <th>Doctor</th>
+              <th>Start</th>
+              <th>End</th>
+              <th>Turnaround Risk</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tradeOptions.map((t, i) => (
+              <tr key={i}>
+                <td>{t.candidate.shiftName}</td>
+                <td>{t.candidate.doctor}</td>
+                <td>{t.candidate.startTime}</td>
+                <td>{t.candidate.endTime}</td>
+                <td style={{ color: t.hasShort ? "red" : "green" }}>
+                  {t.hasShort
+                    ? `SHORT TURNAROUND ${
+                        t.myShort ? "(for YOU) " : ""
+                      }${t.theirShort ? "(for THEM)" : ""}`
+                    : "OK (≥ 12h each)"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
