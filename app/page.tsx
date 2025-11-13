@@ -12,10 +12,17 @@ type Shift = {
   raw?: string;
 };
 
-// 🔴 FILL THIS IN with real emails / phones when you have permission.
-const CONTACTS: Record<string, { email?: string; phone?: string }> = {
-  // "Klassen": { email: "you@example.com", phone: "+1-204-555-1234" },
-  // "O'Leary": { email: "oleary@example.com" },
+type Contact = {
+  email: string;
+  phone: string;
+  preferred: "email" | "sms" | "either" | "none";
+};
+
+const CONTACTS_STORAGE_KEY = "metriManagerContacts";
+
+// Optional: seed contacts if you want built-in defaults
+const SEED_CONTACTS: Record<string, Contact> = {
+  // "Klassen": { email: "you@example.com", phone: "+1-204-555-1234", preferred: "either" },
 };
 
 function toDateTime(date: string, time: string): Date {
@@ -73,9 +80,17 @@ export default function Page() {
   const [selectedDoctor, setSelectedDoctor] = useState("");
   const [selectedShiftIndex, setSelectedShiftIndex] = useState("");
 
-  // user contact info for messages
-  const [userEmail, setUserEmail] = useState("");
-  const [userPhone, setUserPhone] = useState("");
+  // "Database" of contacts (per doctor), stored in localStorage
+  const [contacts, setContacts] = useState<Record<string, Contact>>({});
+
+  // Draft contact info for the currently selected doctor
+  const [contactDraft, setContactDraft] = useState<Contact>({
+    email: "",
+    phone: "",
+    preferred: "none",
+  });
+
+  const [contactSavedMessage, setContactSavedMessage] = useState("");
 
   // Load schedule from API
   useEffect(() => {
@@ -94,7 +109,30 @@ export default function Page() {
       .catch(() => setError("Could not load schedule."));
   }, []);
 
-  // All doctor names
+  // Load contacts from localStorage on first client render
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(CONTACTS_STORAGE_KEY);
+      const stored = raw ? (JSON.parse(raw) as Record<string, Contact>) : {};
+      setContacts({ ...SEED_CONTACTS, ...stored });
+    } catch {
+      setContacts({ ...SEED_CONTACTS });
+    }
+  }, []);
+
+  // Persist contacts whenever they change
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const toStore = JSON.stringify(contacts);
+      window.localStorage.setItem(CONTACTS_STORAGE_KEY, toStore);
+    } catch {
+      // ignore
+    }
+  }, [contacts]);
+
+  // All doctor names (from schedule)
   const doctors = useMemo(
     () =>
       Array.from(
@@ -106,6 +144,21 @@ export default function Page() {
       ).sort((a, b) => a.localeCompare(b)),
     [shifts]
   );
+
+  // When doctor changes, update contactDraft from "database"
+  useEffect(() => {
+    setContactSavedMessage("");
+    if (!selectedDoctor) {
+      setContactDraft({ email: "", phone: "", preferred: "none" });
+      return;
+    }
+    const existing = contacts[selectedDoctor];
+    setContactDraft({
+      email: existing?.email || "",
+      phone: existing?.phone || "",
+      preferred: existing?.preferred || "none",
+    });
+  }, [selectedDoctor, contacts]);
 
   // FUTURE shifts for selected doctor only
   const doctorShifts = useMemo(() => {
@@ -179,6 +232,14 @@ export default function Page() {
       });
   }, [myShift, sameDayShifts, shifts]);
 
+  const myContact: Contact | undefined =
+    selectedDoctor && contacts[selectedDoctor]
+      ? contacts[selectedDoctor]
+      : undefined;
+
+  const myEmail = myContact?.email || "";
+  const myPhone = myContact?.phone || "";
+
   // Build the message body for email/SMS
   const buildOfferMessage = (candidate: Shift) => {
     if (!myShift) return "";
@@ -189,7 +250,7 @@ export default function Page() {
     const myShiftStr = `${myShift.date} ${myShift.shiftName} ${myShift.startTime}–${myShift.endTime}`;
     const theirShiftStr = `${candidate.date} ${candidate.shiftName} ${candidate.startTime}–${candidate.endTime}`;
 
-    const contactBits = [userEmail, userPhone].filter(Boolean).join(" / ");
+    const contactBits = [myEmail, myPhone].filter(Boolean).join(" / ");
     const contactLine = contactBits
       ? `Please contact ${meLabel} at ${contactBits} if you're interested.`
       : `Please contact ${meLabel} if you're interested.`;
@@ -217,14 +278,15 @@ ${contactLine}
     const meLabel = meName ? `Dr. ${meName}` : "Unknown doctor";
     const otherName = candidate.doctor;
 
-    const otherEmail = CONTACTS[otherName]?.email ?? "";
-    const myEmail = userEmail || CONTACTS[meName]?.email || "";
+    const otherContact = contacts[otherName];
+    const otherEmail = otherContact?.email ?? "";
+    const myEmailForSend = myEmail;
 
-    if (otherEmail || myEmail) {
-      const to = otherEmail || myEmail;
+    if (otherEmail || myEmailForSend) {
+      const to = otherEmail || myEmailForSend;
       const ccParam =
-        otherEmail && myEmail && otherEmail !== myEmail
-          ? `&cc=${encodeURIComponent(myEmail)}`
+        otherEmail && myEmailForSend && otherEmail !== myEmailForSend
+          ? `&cc=${encodeURIComponent(myEmailForSend)}`
           : "";
       const subject = encodeURIComponent(
         `SAME-DAY SHIFT TRADE OFFER from ${meLabel}`
@@ -263,11 +325,12 @@ ${contactLine}
     const meName = selectedDoctor || "Unknown doctor";
     const otherName = candidate.doctor;
 
-    const otherPhone = CONTACTS[otherName]?.phone ?? "";
-    const myPhone = userPhone || CONTACTS[meName]?.phone || "";
+    const otherContact = contacts[otherName];
+    const otherPhone = otherContact?.phone ?? "";
+    const myPhoneForSend = myPhone;
 
-    if (otherPhone || myPhone) {
-      const to = otherPhone || myPhone;
+    if (otherPhone || myPhoneForSend) {
+      const to = otherPhone || myPhoneForSend;
       const smsUrl = `sms:${encodeURIComponent(
         to
       )}?body=${encodeURIComponent(message)}`;
@@ -290,6 +353,21 @@ ${contactLine}
     }
   };
 
+  // Save contact info for selected doctor
+  const handleSaveContact = () => {
+    if (!selectedDoctor) return;
+    setContacts((prev) => ({
+      ...prev,
+      [selectedDoctor]: {
+        email: contactDraft.email.trim(),
+        phone: contactDraft.phone.trim(),
+        preferred: contactDraft.preferred,
+      },
+    }));
+    setContactSavedMessage("Contact information saved.");
+    setTimeout(() => setContactSavedMessage(""), 3000);
+  };
+
   return (
     <div style={{ padding: "1rem", maxWidth: 900, margin: "0 auto" }}>
       <h1>Same-Day Trades</h1>
@@ -298,55 +376,13 @@ ${contactLine}
         Beer, Evening Out)
       </p>
       <p>
-        1) Enter your contact info (optional). 2) Choose{" "}
-        <strong>your name</strong>. 3) Choose one of{" "}
-        <strong>your future shifts</strong>. The app shows who else works that
-        day and flags trades that create a{" "}
+        1) Choose <strong>your name</strong> and confirm your contact info.
+        2) Choose one of <strong>your future shifts</strong>. The app shows who
+        else works that day and flags trades that create a{" "}
         <strong>SHORT TURNAROUND (&lt; 12h)</strong> for either doctor.
-      </p>
-      <p style={{ fontStyle: "italic", marginLeft: "1rem" }}>
-        Example shift labels:
-        <br />
-        2025-11-17 R-N 23:00–09:00
-        <br />
-        2025-11-18 Surge-AM 08:00–17:00
       </p>
 
       {error && <p style={{ color: "red" }}>{error}</p>}
-
-      <hr />
-
-      {/* Contact info */}
-      <h2>Your contact info (for trade offers)</h2>
-      <div style={{ marginBottom: "0.5rem" }}>
-        <label>
-          Email:&nbsp;
-          <input
-            type="email"
-            value={userEmail}
-            onChange={(e) => setUserEmail(e.target.value)}
-            style={{ width: "100%", maxWidth: 400 }}
-            placeholder="you@example.com"
-          />
-        </label>
-      </div>
-      <div style={{ marginBottom: "0.5rem" }}>
-        <label>
-          Phone (optional):&nbsp;
-          <input
-            type="tel"
-            value={userPhone}
-            onChange={(e) => setUserPhone(e.target.value)}
-            style={{ width: "100%", maxWidth: 400 }}
-            placeholder="+1-204-555-1234"
-          />
-        </label>
-      </div>
-      <p style={{ fontSize: "0.9rem", color: "#555" }}>
-        Your email/phone are only used to fill in the trade-offer message.
-        Nothing is sent automatically; you always confirm via your email or SMS
-        app.
-      </p>
 
       <hr />
 
@@ -369,6 +405,123 @@ ${contactLine}
             </option>
           ))}
         </select>
+      )}
+
+      {/* Contact registration / editing for selected doctor */}
+      {selectedDoctor && (
+        <>
+          <hr />
+          <h2>Contact registration for Metri-Manager</h2>
+          <p>
+            You are editing contact info for:{" "}
+            <strong>Dr. {selectedDoctor}</strong>
+          </p>
+          <div style={{ marginBottom: "0.5rem" }}>
+            <label>
+              Email:&nbsp;
+              <input
+                type="email"
+                value={contactDraft.email}
+                onChange={(e) =>
+                  setContactDraft((c) => ({
+                    ...c,
+                    email: e.target.value,
+                  }))
+                }
+                style={{ width: "100%", maxWidth: 400 }}
+                placeholder="you@example.com"
+              />
+            </label>
+          </div>
+          <div style={{ marginBottom: "0.5rem" }}>
+            <label>
+              Phone (optional):&nbsp;
+              <input
+                type="tel"
+                value={contactDraft.phone}
+                onChange={(e) =>
+                  setContactDraft((c) => ({
+                    ...c,
+                    phone: e.target.value,
+                  }))
+                }
+                style={{ width: "100%", maxWidth: 400 }}
+                placeholder="+1-204-555-1234"
+              />
+            </label>
+          </div>
+          <div style={{ marginBottom: "0.5rem" }}>
+            <span>Preferred notification method:&nbsp;</span>
+            <label>
+              <input
+                type="radio"
+                name="preferred"
+                value="email"
+                checked={contactDraft.preferred === "email"}
+                onChange={() =>
+                  setContactDraft((c) => ({ ...c, preferred: "email" }))
+                }
+              />
+              &nbsp;Email
+            </label>
+            &nbsp;&nbsp;
+            <label>
+              <input
+                type="radio"
+                name="preferred"
+                value="sms"
+                checked={contactDraft.preferred === "sms"}
+                onChange={() =>
+                  setContactDraft((c) => ({ ...c, preferred: "sms" }))
+                }
+              />
+              &nbsp;SMS
+            </label>
+            &nbsp;&nbsp;
+            <label>
+              <input
+                type="radio"
+                name="preferred"
+                value="either"
+                checked={contactDraft.preferred === "either"}
+                onChange={() =>
+                  setContactDraft((c) => ({ ...c, preferred: "either" }))
+                }
+              />
+              &nbsp;Either
+            </label>
+            &nbsp;&nbsp;
+            <label>
+              <input
+                type="radio"
+                name="preferred"
+                value="none"
+                checked={contactDraft.preferred === "none"}
+                onChange={() =>
+                  setContactDraft((c) => ({ ...c, preferred: "none" }))
+                }
+              />
+              &nbsp;I prefer not to share
+            </label>
+          </div>
+          <button
+            type="button"
+            onClick={handleSaveContact}
+            style={{ padding: "0.4rem 0.8rem", marginBottom: "0.5rem" }}
+          >
+            Save contact info
+          </button>
+          {contactSavedMessage && (
+            <div style={{ color: "green", marginBottom: "0.5rem" }}>
+              {contactSavedMessage}
+            </div>
+          )}
+          <p style={{ fontSize: "0.9rem", color: "#555" }}>
+            By entering my email and/or phone number and clicking Save, I
+            consent to this site storing my contact information so that other
+            users can contact me for shift trades.
+          </p>
+        </>
       )}
 
       <hr />
