@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 type Shift = {
   date: string;
@@ -13,13 +13,15 @@ type Shift = {
 };
 
 function toDateTime(date: string, time: string): Date {
-  return new Date(`${date}T${time || "00:00"}:00`);
+  if (!date || !time) return new Date(NaN);
+  return new Date(`${date}T${time}:00`);
 }
 
 function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
   const start = toDateTime(shift.date, shift.startTime);
   let end = toDateTime(shift.date, shift.endTime);
-  if (shift.endTime && shift.startTime && end <= start) {
+  // if end is “earlier” than start (e.g., 23:30–07:30), assume it crosses midnight
+  if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && end <= start) {
     end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
   }
   return { start, end };
@@ -34,7 +36,9 @@ function findPreviousShiftEnd(
   for (const s of allShifts) {
     if (!doctor || !s.doctor || s.doctor !== doctor) continue;
     const { end } = getShiftDateTimes(s);
-    if (end < referenceStart) candidates.push(end);
+    if (!isNaN(end.getTime()) && end < referenceStart) {
+      candidates.push(end);
+    }
   }
   if (!candidates.length) return null;
   candidates.sort((a, b) => b.getTime() - a.getTime());
@@ -49,16 +53,26 @@ export default function Page() {
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [selectedDate, setSelectedDate] = useState("");
   const [myShiftId, setMyShiftId] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/schedule")
       .then((r) => r.json())
-      .then((data: Shift[]) => {
+      .then((data) => {
+        if (!Array.isArray(data)) {
+          console.error("Schedule API returned non-array:", data);
+          setError("Could not load schedule data from calendar.");
+          return;
+        }
         setShifts(data);
         if (data.length) {
           const earliest = [...new Set(data.map((s) => s.date))].sort()[0];
           setSelectedDate(earliest);
         }
+      })
+      .catch((err) => {
+        console.error("Error fetching schedule:", err);
+        setError("Could not load schedule data.");
       });
   }, []);
 
@@ -89,7 +103,7 @@ export default function Page() {
         let myFlag = false;
         let otherFlag = false;
 
-        if (myDoc) {
+        if (myDoc && !isNaN(candStart.getTime())) {
           const myPrevEnd = findPreviousShiftEnd(shifts, myDoc, candStart);
           if (myPrevEnd) {
             const gap = hoursDiff(candStart, myPrevEnd);
@@ -97,7 +111,7 @@ export default function Page() {
           }
         }
 
-        if (candDoc) {
+        if (candDoc && !isNaN(myStart.getTime())) {
           const theirPrevEnd = findPreviousShiftEnd(shifts, candDoc, myStart);
           if (theirPrevEnd) {
             const gap = hoursDiff(myStart, theirPrevEnd);
@@ -124,6 +138,11 @@ export default function Page() {
     <div className="min-h-screen flex gap-4 p-4 bg-slate-50">
       <aside className="w-64 bg-white border rounded p-3 space-y-3">
         <h2 className="font-semibold mb-1">Dates</h2>
+        {error && (
+          <p className="text-xs text-red-600 mb-2">
+            {error} (the app will show no shifts until this is fixed.)
+          </p>
+        )}
         <ul className="space-y-1 max-h-[60vh] overflow-y-auto">
           {dates.map((d) => (
             <li key={d}>
@@ -140,12 +159,17 @@ export default function Page() {
               </button>
             </li>
           ))}
+          {!dates.length && !error && (
+            <li className="text-sm text-slate-500">Loading dates…</li>
+          )}
         </ul>
       </aside>
 
       <main className="flex-1 space-y-5">
         <header>
-          <h1 className="text-2xl font-bold">Shifts for {selectedDate || "—"}</h1>
+          <h1 className="text-2xl font-bold">
+            Shifts for {selectedDate || "—"}
+          </h1>
           <p className="text-sm text-slate-500">
             Select your shift, then review same-day trade options. Trades that
             create &lt; 12h rest for either doctor are flagged.
@@ -184,7 +208,9 @@ export default function Page() {
               {!shiftsToday.length && (
                 <tr>
                   <td className="p-3" colSpan={5}>
-                    No shifts today.
+                    {error
+                      ? "No shifts loaded due to an error."
+                      : "No shifts today."}
                   </td>
                 </tr>
               )}
