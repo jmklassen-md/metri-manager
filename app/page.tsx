@@ -3,14 +3,16 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 type Shift = {
-  date: string;
-  shiftName: string;
-  startTime: string;
-  endTime: string;
+  date: string;       // YYYY-MM-DD
+  shiftName: string;  // e.g. SBH - ED - R-PM2 - 15:30-00:30 - Peters (Day 2/2)
+  startTime: string;  // HH:MM 24h local
+  endTime: string;    // HH:MM 24h local
   doctor: string;
   location?: string;
   raw?: string;
 };
+
+// ---- time helpers ---------------------------------------------------------
 
 function toDateTime(date: string, time: string): Date {
   if (!date || !time) return new Date(NaN);
@@ -20,11 +22,17 @@ function toDateTime(date: string, time: string): Date {
 function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
   const start = toDateTime(shift.date, shift.startTime);
   let end = toDateTime(shift.date, shift.endTime);
-  // if end is “earlier” than start (e.g., 23:30–07:30), assume it crosses midnight
+
+  // Handle overnight shifts (end earlier than start -> next day)
   if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && end <= start) {
     end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
   }
+
   return { start, end };
+}
+
+function hoursDiff(later: Date, earlier: Date) {
+  return (later.getTime() - earlier.getTime()) / (1000 * 60 * 60);
 }
 
 function findPreviousShiftEnd(
@@ -32,244 +40,233 @@ function findPreviousShiftEnd(
   doctor: string,
   referenceStart: Date
 ): Date | null {
-  const candidates: Date[] = [];
+  const ends: Date[] = [];
+
   for (const s of allShifts) {
-    if (!doctor || !s.doctor || s.doctor !== doctor) continue;
+    if (s.doctor !== doctor) continue;
     const { end } = getShiftDateTimes(s);
     if (!isNaN(end.getTime()) && end < referenceStart) {
-      candidates.push(end);
+      ends.push(end);
     }
   }
-  if (!candidates.length) return null;
-  candidates.sort((a, b) => b.getTime() - a.getTime());
-  return candidates[0];
+
+  if (!ends.length) return null;
+  ends.sort((a, b) => b.getTime() - a.getTime()); // most recent first
+  return ends[0];
 }
 
-function hoursDiff(later: Date, earlier: Date) {
-  return (later.getTime() - earlier.getTime()) / (1000 * 60 * 60);
-}
+// ---- main component -------------------------------------------------------
 
 export default function Page() {
   const [shifts, setShifts] = useState<Shift[]>([]);
-  const [selectedDate, setSelectedDate] = useState("");
-  const [myShiftId, setMyShiftId] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState<string>("");
 
+  // Load all shifts from API
   useEffect(() => {
     fetch("/api/schedule")
       .then((r) => r.json())
       .then((data) => {
         if (!Array.isArray(data)) {
-          console.error("Schedule API returned non-array:", data);
-          setError("Could not load schedule data from calendar.");
+          console.error("API did not return an array:", data);
+          setError("Could not load schedule from calendar.");
           return;
         }
-        setShifts(data);
-        if (data.length) {
-          const earliest = [...new Set(data.map((s) => s.date))].sort()[0];
-          setSelectedDate(earliest);
-        }
+        // Sort by date + start time
+        const sorted = [...data].sort((a, b) => {
+          const keyA = `${a.date} ${a.startTime}`;
+          const keyB = `${b.date} ${b.startTime}`;
+          return keyA.localeCompare(keyB);
+        });
+        setShifts(sorted);
       })
-      .catch((err) => {
-        console.error("Error fetching schedule:", err);
-        setError("Could not load schedule data.");
+      .catch((e) => {
+        console.error(e);
+        setError("Could not load schedule from calendar.");
       });
   }, []);
 
-  const dates = useMemo(
-    () => Array.from(new Set(shifts.map((s) => s.date))).sort(),
-    [shifts]
-  );
-
-  const shiftsToday = shifts.filter((s) => s.date === selectedDate);
-
   const myShift =
-    myShiftId !== ""
-      ? shiftsToday.find((_, idx) => String(idx) === myShiftId)
-      : null;
+    selectedIndex === "" ? null : shifts[parseInt(selectedIndex, 10)];
 
-  const potentialTrades = useMemo(() => {
+  const sameDayShifts = useMemo(() => {
     if (!myShift) return [];
-    const myDoc = myShift.doctor;
+    return shifts.filter((s) => s.date === myShift.date);
+  }, [myShift, shifts]);
+
+  const tradeOptions = useMemo(() => {
+    if (!myShift) return [];
+
     const { start: myStart } = getShiftDateTimes(myShift);
+    const myDoctor = myShift.doctor;
 
-    return shiftsToday
-      .map((candidate, idx) => {
-        if (candidate === myShift) return null;
+    return sameDayShifts
+      .filter((s) => s !== myShift)
+      .map((candidate) => {
+        const { start: theirStart } = getShiftDateTimes(candidate);
+        const theirDoctor = candidate.doctor;
 
-        const candDoc = candidate.doctor;
-        const { start: candStart } = getShiftDateTimes(candidate);
+        let myShort = false;
+        let theirShort = false;
 
-        let myFlag = false;
-        let otherFlag = false;
-
-        if (myDoc && !isNaN(candStart.getTime())) {
-          const myPrevEnd = findPreviousShiftEnd(shifts, myDoc, candStart);
-          if (myPrevEnd) {
-            const gap = hoursDiff(candStart, myPrevEnd);
-            if (gap < 12) myFlag = true;
+        // If I take THEIR shift: look at my previous end → theirStart
+        if (myDoctor && !isNaN(theirStart.getTime())) {
+          const prevEnd = findPreviousShiftEnd(shifts, myDoctor, theirStart);
+          if (prevEnd) {
+            const gap = hoursDiff(theirStart, prevEnd);
+            if (gap < 12) myShort = true;
           }
         }
 
-        if (candDoc && !isNaN(myStart.getTime())) {
-          const theirPrevEnd = findPreviousShiftEnd(shifts, candDoc, myStart);
-          if (theirPrevEnd) {
-            const gap = hoursDiff(myStart, theirPrevEnd);
-            if (gap < 12) otherFlag = true;
+        // If THEY take MY shift: look at their previous end → myStart
+        if (theirDoctor && !isNaN(myStart.getTime())) {
+          const prevEnd = findPreviousShiftEnd(
+            shifts,
+            theirDoctor,
+            myStart
+          );
+          if (prevEnd) {
+            const gap = hoursDiff(myStart, prevEnd);
+            if (gap < 12) theirShort = true;
           }
         }
 
         return {
-          idx,
           candidate,
-          hasShort: myFlag || otherFlag,
-          who: { me: myFlag, them: otherFlag },
+          myShort,
+          theirShort,
+          hasShort: myShort || theirShort,
         };
-      })
-      .filter(Boolean) as Array<{
-      idx: number;
-      candidate: Shift;
-      hasShort: boolean;
-      who: { me: boolean; them: boolean };
-    }>;
-  }, [myShift, shiftsToday, shifts]);
+      });
+  }, [myShift, sameDayShifts, shifts]);
 
   return (
-    <div className="min-h-screen flex gap-4 p-4 bg-slate-50">
-      <aside className="w-64 bg-white border rounded p-3 space-y-3">
-        <h2 className="font-semibold mb-1">Dates</h2>
-        {error && (
-          <p className="text-xs text-red-600 mb-2">
-            {error} (the app will show no shifts until this is fixed.)
-          </p>
+    <div style={{ padding: "1rem", maxWidth: 900, margin: "0 auto" }}>
+      <h1>Shift Trade Helper</h1>
+      <p>
+        Pick the shift you&apos;re working. The app will show other doctors on
+        the same day and flag trades that create a{" "}
+        <strong>SHORT TURNAROUND (&lt; 12 hours)</strong> for you or them.
+      </p>
+
+      {error && (
+        <p style={{ color: "red", marginTop: "1rem" }}>
+          {error} (The calendar URL or access might be wrong.)
+        </p>
+      )}
+
+      <hr style={{ margin: "1rem 0" }} />
+
+      <section>
+        <h2>1. Select your shift</h2>
+        {shifts.length === 0 && !error && <p>Loading shifts…</p>}
+
+        {shifts.length > 0 && (
+          <select
+            value={selectedIndex}
+            onChange={(e) => setSelectedIndex(e.target.value)}
+            style={{ minWidth: "100%", padding: "0.5rem", marginTop: "0.5rem" }}
+          >
+            <option value="">-- Choose one of your shifts --</option>
+            {shifts.map((s, idx) => (
+              <option key={idx} value={idx}>
+                {s.date} — {s.shiftName} — {s.doctor}
+              </option>
+            ))}
+          </select>
         )}
-        <ul className="space-y-1 max-h-[60vh] overflow-y-auto">
-          {dates.map((d) => (
-            <li key={d}>
-              <button
-                onClick={() => {
-                  setSelectedDate(d);
-                  setMyShiftId("");
-                }}
-                className={`w-full text-left px-2 py-1 rounded ${
-                  d === selectedDate ? "bg-slate-200" : ""
-                }`}
-              >
-                {d}
-              </button>
-            </li>
-          ))}
-          {!dates.length && !error && (
-            <li className="text-sm text-slate-500">Loading dates…</li>
-          )}
-        </ul>
-      </aside>
+      </section>
 
-      <main className="flex-1 space-y-5">
-        <header>
-          <h1 className="text-2xl font-bold">
-            Shifts for {selectedDate || "—"}
-          </h1>
-          <p className="text-sm text-slate-500">
-            Select your shift, then review same-day trade options. Trades that
-            create &lt; 12h rest for either doctor are flagged.
-          </p>
-        </header>
+      <hr style={{ margin: "1rem 0" }} />
 
-        <section className="bg-white border rounded overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-100">
-              <tr>
-                <th className="p-2 text-left">Mine?</th>
-                <th className="p-2 text-left">Shift</th>
-                <th className="p-2 text-left">Doctor</th>
-                <th className="p-2 text-left">Start</th>
-                <th className="p-2 text-left">End</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shiftsToday.map((s, idx) => (
-                <tr key={idx} className="border-b last:border-b-0">
-                  <td className="p-2">
-                    <input
-                      type="radio"
-                      name="myShift"
-                      value={idx}
-                      checked={myShiftId === String(idx)}
-                      onChange={() => setMyShiftId(String(idx))}
-                    />
-                  </td>
-                  <td className="p-2">{s.shiftName || s.raw}</td>
-                  <td className="p-2">{s.doctor}</td>
-                  <td className="p-2">{s.startTime}</td>
-                  <td className="p-2">{s.endTime}</td>
-                </tr>
-              ))}
-              {!shiftsToday.length && (
-                <tr>
-                  <td className="p-3" colSpan={5}>
-                    {error
-                      ? "No shifts loaded due to an error."
-                      : "No shifts today."}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </section>
+      <section>
+        <h2>2. Shifts on the same day</h2>
+        {!myShift && <p>Select your shift above to see same-day shifts.</p>}
 
-        <section className="bg-white border rounded p-3 space-y-3">
-          <h2 className="font-semibold">Potential same-day trades</h2>
-          {!myShift && (
-            <p className="text-sm text-slate-500">
-              Pick your shift above to see trade options.
+        {myShift && (
+          <>
+            <p>
+              <strong>Your shift:</strong> {myShift.date} — {myShift.shiftName} —{" "}
+              {myShift.doctor} ({myShift.startTime}–{myShift.endTime})
             </p>
-          )}
-          {myShift && potentialTrades.length > 0 && (
-            <table className="w-full text-sm">
-              <thead className="bg-slate-100">
+
+            <table
+              border={1}
+              cellPadding={4}
+              style={{ borderCollapse: "collapse", marginTop: "0.5rem" }}
+            >
+              <thead>
                 <tr>
-                  <th className="p-2 text-left">Shift</th>
-                  <th className="p-2 text-left">Doctor</th>
-                  <th className="p-2 text-left">Start</th>
-                  <th className="p-2 text-left">End</th>
-                  <th className="p-2 text-left">Flags</th>
+                  <th>Shift</th>
+                  <th>Doctor</th>
+                  <th>Start</th>
+                  <th>End</th>
                 </tr>
               </thead>
               <tbody>
-                {potentialTrades.map((t) => (
-                  <tr key={t.idx} className="border-b last:border-b-0">
-                    <td className="p-2">
-                      {t.candidate.shiftName || t.candidate.raw}
-                    </td>
-                    <td className="p-2">{t.candidate.doctor}</td>
-                    <td className="p-2">{t.candidate.startTime}</td>
-                    <td className="p-2">{t.candidate.endTime}</td>
-                    <td className="p-2">
-                      {t.hasShort ? (
-                        <span className="inline-block px-2 py-1 text-xs bg-red-100 text-red-700 rounded">
-                          SHORT TURNAROUND
-                          {t.who.me ? " (you)" : ""}
-                          {t.who.them ? " (other)" : ""}
-                        </span>
-                      ) : (
-                        <span className="inline-block px-2 py-1 text-xs bg-emerald-50 text-emerald-700 rounded">
-                          OK
-                        </span>
-                      )}
-                    </td>
+                {sameDayShifts.map((s, i) => (
+                  <tr key={i}>
+                    <td>{s.shiftName || s.raw}</td>
+                    <td>{s.doctor}</td>
+                    <td>{s.startTime}</td>
+                    <td>{s.endTime}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          )}
-          {myShift && !potentialTrades.length && (
-            <p className="text-sm text-slate-500">
-              No other shifts to trade with today.
-            </p>
-          )}
-        </section>
-      </main>
+          </>
+        )}
+      </section>
+
+      <hr style={{ margin: "1rem 0" }} />
+
+      <section>
+        <h2>3. Trade analysis</h2>
+        {!myShift && <p>Select your shift above to see trade options.</p>}
+
+        {myShift && tradeOptions.length === 0 && (
+          <p>No other shifts on that day to trade with.</p>
+        )}
+
+        {myShift && tradeOptions.length > 0 && (
+          <table
+            border={1}
+            cellPadding={4}
+            style={{ borderCollapse: "collapse", marginTop: "0.5rem" }}
+          >
+            <thead>
+              <tr>
+                <th>Candidate shift</th>
+                <th>Doctor</th>
+                <th>Start</th>
+                <th>End</th>
+                <th>Turnaround risk</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tradeOptions.map((t, i) => (
+                <tr key={i}>
+                  <td>{t.candidate.shiftName || t.candidate.raw}</td>
+                  <td>{t.candidate.doctor}</td>
+                  <td>{t.candidate.startTime}</td>
+                  <td>{t.candidate.endTime}</td>
+                  <td>
+                    {t.hasShort ? (
+                      <>
+                        <strong>SHORT TURNAROUND</strong>{" "}
+                        {t.myShort && "(for YOU) "} 
+                        {t.theirShort && "(for THEM)"}
+                      </>
+                    ) : (
+                      "OK (≥ 12h for both)"
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
     </div>
   );
 }
