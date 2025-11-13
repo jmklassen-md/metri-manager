@@ -3,10 +3,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 type Shift = {
-  date: string;
-  shiftName: string;
-  startTime: string;
-  endTime: string;
+  date: string;       // "2025-11-17"
+  shiftName: string; // "R-N", "Surge-AM", etc.
+  startTime: string; // "23:00"
+  endTime: string;   // "09:00"
   doctor: string;
   location?: string;
   raw?: string;
@@ -21,6 +21,7 @@ function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
   const start = toDateTime(shift.date, shift.startTime);
   let end = toDateTime(shift.date, shift.endTime);
 
+  // Overnight shifts: if end <= start, push end to next day
   if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && end <= start) {
     end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
   }
@@ -91,19 +92,28 @@ export default function Page() {
     [shifts]
   );
 
-  // Shifts for selected doctor
-  const doctorShifts = useMemo(
-    () =>
-      shifts
-        .map((s, index) => ({ s, index }))
-        .filter(
-          ({ s }) =>
-            selectedDoctor &&
-            (s.doctor || "").trim().toLowerCase() ===
-              selectedDoctor.trim().toLowerCase()
-        ),
-    [selectedDoctor, shifts]
-  );
+  // FUTURE shifts for selected doctor only
+  const doctorShifts = useMemo(() => {
+    if (!selectedDoctor) return [];
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0); // midnight today
+
+    return shifts
+      .map((s, index) => ({ s, index }))
+      .filter(({ s }) => {
+        // correct doctor?
+        const docMatches =
+          (s.doctor || "").trim().toLowerCase() ===
+          selectedDoctor.trim().toLowerCase();
+
+        if (!docMatches) return false;
+
+        // future (or today) only
+        const shiftDate = new Date(s.date + "T00:00:00");
+        return shiftDate >= today;
+      });
+  }, [selectedDoctor, shifts]);
 
   const myShift =
     selectedShiftIndex === ""
@@ -129,12 +139,14 @@ export default function Page() {
         let myShort = false;
         let theirShort = false;
 
+        // If YOU take THEIR shift
         const myPrev = findPreviousShiftEnd(shifts, myDoctor, theirStart);
         if (myPrev) {
           const gap = hoursDiff(theirStart, myPrev);
           if (gap < 12) myShort = true;
         }
 
+        // If THEY take YOUR shift
         const theirPrev = findPreviousShiftEnd(
           shifts,
           candidate.doctor,
@@ -159,12 +171,12 @@ export default function Page() {
       <h1>Shift Trade Helper</h1>
       <p>
         1) Choose <strong>your name</strong>. 2) Choose one of{" "}
-        <strong>your shifts</strong>. Each option shows:
+        <strong>your future shifts</strong>. Each option shows:
       </p>
       <p style={{ fontStyle: "italic", marginLeft: "1rem" }}>
-        2025-11-17 Surge-AM 08:00–17:00
+        2025-11-17 R-N 23:00–09:00
         <br />
-        2025-11-18 RAZ-N 23:30–09:30
+        2025-11-18 Surge-AM 08:00–17:00
       </p>
 
       {error && <p style={{ color: "red" }}>{error}</p>}
@@ -195,11 +207,11 @@ export default function Page() {
       <hr />
 
       {/* Shift dropdown */}
-      <h2>2. Pick one of your shifts</h2>
+      <h2>2. Pick one of your future shifts</h2>
       {!selectedDoctor && <p>Select your name first.</p>}
 
       {selectedDoctor && doctorShifts.length === 0 && (
-        <p>No shifts found for {selectedDoctor}.</p>
+        <p>No future shifts found for {selectedDoctor}.</p>
       )}
 
       {selectedDoctor && doctorShifts.length > 0 && (
