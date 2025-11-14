@@ -36,11 +36,11 @@ type TradeCandidate = {
 type GetTogetherWarning = {
   doctor: string;
   shiftName: string;
-  shiftDate: string; // when that shift actually starts
+  shiftDate: string; // shift start date
 };
 
 type GetTogetherDate = {
-  date: string; // the date we’re considering for the evening meetup
+  date: string; // considered get-together date
   preNights: GetTogetherWarning[];
   comingOffDays: GetTogetherWarning[];
   postNights: GetTogetherWarning[];
@@ -65,12 +65,12 @@ function makeDateTime(date: string, time: string): Date {
   return new Date(`${date}T${time}:00`);
 }
 
-// Adjust end datetime for overnight shifts
+// For overnight shifts adjust end datetime
 function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
   const start = makeDateTime(shift.date, shift.startTime);
   let end = makeDateTime(shift.date, shift.endTime);
   if (end <= start) {
-    end = new Date(end.getTime() + 24 * 60 * 60 * 1000); // +1 day
+    end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
   }
   return { start, end };
 }
@@ -79,15 +79,19 @@ function hoursBetween(a: Date, b: Date): number {
   return Math.abs(b.getTime() - a.getTime()) / (1000 * 60 * 60);
 }
 
-function intervalOverlaps(
-  aStart: Date,
-  aEnd: Date,
-  bStart: Date,
-  bEnd: Date
-): boolean {
-  return aStart < bEnd && aEnd > bStart;
+// Time helpers for Get Together logic
+function toMinutes(time: string): number {
+  const [h, m] = time.split(":").map(Number);
+  return h * 60 + m;
 }
 
+function previousDateStr(date: string): string {
+  const d = new Date(`${date}T00:00:00`);
+  d.setDate(d.getDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// ICS builder for Get Together
 function buildGetTogetherICS(date: string, doctors: string[]): string {
   const y = date.slice(0, 4);
   const m = date.slice(5, 7);
@@ -129,9 +133,10 @@ export default function HomePage() {
     []
   );
 
-  // Contacts (optional)
+  // Contacts (optional, via DB)
   const [contacts, setContacts] = useState<Contact[]>([]);
 
+  // Load schedule
   useEffect(() => {
     (async () => {
       try {
@@ -150,6 +155,7 @@ export default function HomePage() {
     })();
   }, []);
 
+  // Load contacts
   useEffect(() => {
     (async () => {
       try {
@@ -169,18 +175,24 @@ export default function HomePage() {
   );
 
   const todayStr = new Date().toISOString().slice(0, 10);
+  const now = new Date();
 
   const allDoctors = useMemo(
     () => Array.from(new Set(shifts.map((s) => s.doctor))).sort(),
     [shifts]
   );
 
-  // ---------- Same-Day Trades helpers ----------
+  // ---------- Same-Day Trades helpers (FUTURE ONLY) ----------
 
   const myFutureShifts = useMemo(() => {
     if (!selectedDoctor) return [];
     return shifts
-      .filter((s) => s.doctor === selectedDoctor && s.date >= todayStr)
+      .filter((s) => s.doctor === selectedDoctor)
+      .filter((s) => {
+        // Only keep shifts whose END is in the future
+        const { end } = getShiftDateTimes(s);
+        return end >= now;
+      })
       .sort((a, b) => {
         if (a.date === b.date) return a.startTime.localeCompare(b.startTime);
         return a.date.localeCompare(b.date);
@@ -189,7 +201,7 @@ export default function HomePage() {
         ...s,
         id: `${s.date}__${s.shiftName}__${s.startTime}__${s.endTime}__${s.doctor}`,
       }));
-  }, [shifts, selectedDoctor, todayStr]);
+  }, [shifts, selectedDoctor, now]);
 
   const selectedMyShift = useMemo(() => {
     if (!selectedShiftId) return null;
@@ -204,6 +216,7 @@ export default function HomePage() {
   ): TradeShortTurnaround[] {
     const relevant = all.filter((s) => s.doctor === doctor);
 
+    // Remove the shift being traded away, add the shift being traded into
     const filtered = relevant.filter(
       (s) =>
         !(
@@ -247,6 +260,7 @@ export default function HomePage() {
     return problems;
   }
 
+  // Build candidates any time my selected shift changes
   useEffect(() => {
     if (!selectedMyShift) {
       setTradeCandidates([]);
@@ -282,33 +296,22 @@ export default function HomePage() {
     setActiveTradeOffer(null);
   }, [selectedMyShift, shifts]);
 
-  // ---------- Get Together date & warning logic (NEW) ----------
+  // ---------- Get Together dates & warnings ----------
 
   const getTogetherDates: GetTogetherDate[] = useMemo(() => {
     if (mode !== "getTogether") return [];
     const selected = selectedDoctorsForMeet;
     if (selected.length === 0) return [];
 
-    // Candidate dates = all dates that appear in the schedule (start dates)
+    // Candidate dates = all dates that appear in the schedule
     const allDates = Array.from(new Set(shifts.map((s) => s.date))).sort();
 
     const result: GetTogetherDate[] = [];
 
     for (const date of allDates) {
-      if (date < todayStr) continue;
+      if (date < todayStr) continue; // only future dates
 
-      const dayStart = new Date(`${date}T00:00:00`);
-      const nightWindowStart = new Date(dayStart.getTime()); // 00:00
-      const nightWindowEnd = new Date(dayStart.getTime() + 6 * 60 * 60 * 1000); // 06:00
-
-      const dayWindowStart = new Date(dayStart.getTime() + 10 * 60 * 60 * 1000); // 10:00
-      const dayWindowEnd = new Date(dayStart.getTime() + 14 * 60 * 60 * 1000); // 14:00
-
-      const eveWindowStart = new Date(dayStart.getTime() + 17 * 60 * 60 * 1000); // 17:00
-      const eveWindowEnd = new Date(dayStart.getTime() + 22 * 60 * 60 * 1000); // 22:00
-
-      const preNightWindowStart = eveWindowEnd; // 22:00
-      const preNightWindowEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000); // 24:00 (next midnight)
+      const prevDate = previousDateStr(date);
 
       let allFree = true;
       const preNightsForDate: GetTogetherWarning[] = [];
@@ -318,56 +321,70 @@ export default function HomePage() {
       for (const doc of selected) {
         const docShifts = shifts.filter((s) => s.doctor === doc);
 
-        let docHasPre = false;
-        let docHasPost = false;
-        let docHasDay = false;
+        let hasPre = false;
+        let hasDay = false;
+        let hasPost = false;
 
         for (const s of docShifts) {
-          const { start, end } = getShiftDateTimes(s);
+          const startM = toMinutes(s.startTime);
+          const endM = toMinutes(s.endTime);
+          const isOvernight = endM <= startM; // e.g. 23:00–09:00
 
-          // 1) If any shift overlaps 17:00–22:00 => they are NOT free that evening
-          if (intervalOverlaps(start, end, eveWindowStart, eveWindowEnd)) {
-            allFree = false;
-            break;
+          // Shifts that START on this date
+          if (s.date === date) {
+            // Evening free test: any work between 17:00–22:00 means NOT free
+            const eveStart = 17 * 60;
+            const eveEnd = 22 * 60;
+            let shiftStart = startM;
+            let shiftEnd = endM;
+            if (isOvernight) {
+              // treat as reaching past midnight
+              shiftEnd += 24 * 60;
+            }
+
+            if (shiftStart < eveEnd && shiftEnd > eveStart) {
+              allFree = false;
+              break;
+            }
+
+            // Coming off days: overlaps 10:00–14:00 on this date
+            if (!hasDay) {
+              const dayStart = 10 * 60;
+              const dayEnd = 14 * 60;
+              let dStart = startM;
+              let dEnd = endM;
+              if (isOvernight) dEnd += 24 * 60;
+              if (dStart < dayEnd && dEnd > dayStart) {
+                comingOffDaysForDate.push({
+                  doctor: doc,
+                  shiftName: s.shiftName,
+                  shiftDate: s.date,
+                });
+                hasDay = true;
+              }
+            }
+
+            // Pre-nights: shift on THIS date starting at or after 22:00
+            if (!hasPre && startM >= 22 * 60) {
+              preNightsForDate.push({
+                doctor: doc,
+                shiftName: s.shiftName,
+                shiftDate: s.date,
+              });
+              hasPre = true;
+            }
           }
 
-          // 2) Pre-nights (22:00–24:00 on this date)
-          if (
-            !docHasPre &&
-            intervalOverlaps(start, end, preNightWindowStart, preNightWindowEnd)
-          ) {
-            preNightsForDate.push({
-              doctor: doc,
-              shiftName: s.shiftName,
-              shiftDate: s.date,
-            });
-            docHasPre = true;
-          }
-
-          // 3) Coming off days (10:00–14:00 on this date)
-          if (
-            !docHasDay &&
-            intervalOverlaps(start, end, dayWindowStart, dayWindowEnd)
-          ) {
-            comingOffDaysForDate.push({
-              doctor: doc,
-              shiftName: s.shiftName,
-              shiftDate: s.date,
-            });
-            docHasDay = true;
-          }
-
-          // 4) Post-nights (00:00–06:00 on this date)
-          if (
-            !docHasPost &&
-            intervalOverlaps(start, end, nightWindowStart, nightWindowEnd)
-          ) {
-            postNightsForDate.push({
-              doctor: doc,
-              shiftName: s.shiftName,
-              shiftDate: s.date,
-            });
-            docHasPost = true;
+          // Shifts that START on the previous date (for post-nights)
+          if (!hasPost && s.date === prevDate) {
+            if (startM >= 22 * 60) {
+              postNightsForDate.push({
+                doctor: doc,
+                shiftName: s.shiftName,
+                shiftDate: s.date,
+              });
+              hasPost = true;
+            }
           }
         }
 
@@ -387,7 +404,7 @@ export default function HomePage() {
     return result;
   }, [mode, selectedDoctorsForMeet, shifts, todayStr]);
 
-  // ---------- Same-Day Trade message ----------
+  // ---------- Same-Day Trade messaging ----------
 
   function buildSameDayTradeMessage(
     me: string,
@@ -524,10 +541,10 @@ export default function HomePage() {
             >
               <h2>Same-Day Trades</h2>
               <p>
-                Choose your name, then one of your future shifts. I’ll list all
-                other shifts on that same day and flag any trades that would
-                create a short turnaround (&lt; 12 hours between shifts for
-                either doctor).
+                Choose your name, then one of your <strong>future</strong>{" "}
+                shifts. I’ll list all other shifts on that same day and flag any
+                trades that would create a short turnaround (&lt; 12 hours
+                between shifts for either doctor).
               </p>
 
               {/* Doctor selection */}
@@ -807,8 +824,8 @@ export default function HomePage() {
               <p>
                 Select doctors below. I’ll show future dates where all of them
                 are free after 17:00. If someone is pre-nights (22:00–24:00),
-                coming off days (10:00–14:00), or post-nights (00:00–06:00), I’ll
-                flag it with a warning.
+                coming off days (10:00–14:00), or post-nights (night starting
+                ≥ 22:00 the previous day), I’ll flag it with a warning.
               </p>
 
               {/* Doctor multi-select */}
