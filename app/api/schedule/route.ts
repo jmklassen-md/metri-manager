@@ -23,7 +23,10 @@ import { NextResponse } from "next/server";
  * If you’re currently using a different env name, just change it below.
  */
 
-const ICS_URL = process.env.CALENDAR_ICS_URL || process.env.METRI_MANAGER_ICS_URL;
+const ICS_URL =
+  process.env.ICS_URL ||
+  process.env.CALENDAR_ICS_URL ||
+  process.env.METRI_MANAGER_ICS_URL;
 
 export async function GET() {
   try {
