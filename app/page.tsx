@@ -3,732 +3,959 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 type Shift = {
-  date: string;       // "2025-11-17"
-  shiftName: string; // "R-N", "Surge-AM", etc.
-  startTime: string; // "23:00"
-  endTime: string;   // "09:00"
+  date: string; // "YYYY-MM-DD"
+  shiftName: string;
+  startTime: string; // "HH:MM"
+  endTime: string; // "HH:MM"
   doctor: string;
-  location?: string;
-  raw?: string;
+  location: string;
+  raw: string;
 };
 
 type Contact = {
-  email: string;
-  phone: string;
-  preferred: "email" | "sms" | "either" | "none";
+  doctor_name: string;
+  email: string | null;
+  phone: string | null;
+  preferred: string | null;
 };
 
-const CONTACTS_STORAGE_KEY = "metriManagerContacts";
+type Mode = "sameDayTrades" | "getTogether";
 
-// Optional: seed contacts if you want built-in defaults
-const SEED_CONTACTS: Record<string, Contact> = {
-  // "Klassen": { email: "you@example.com", phone: "+1-204-555-1234", preferred: "either" },
+type TradeShortTurnaround = {
+  doctor: string;
+  existingShift: Shift;
+  newShift: Shift;
+  gapHours: number;
 };
 
-function toDateTime(date: string, time: string): Date {
-  if (!date || !time) return new Date(NaN);
+type TradeCandidate = {
+  otherShift: Shift;
+  shortTurnarounds: TradeShortTurnaround[];
+};
+
+type GetTogetherDate = {
+  date: string;
+  nights: { doctor: string; shiftName: string; startTime: string; endTime: string }[];
+};
+
+// ---------- Helper functions (shared) ----------
+
+function formatDateLabel(date: string): string {
+  return new Date(date).toLocaleDateString("en-CA", {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function formatShiftLabel(shift: Shift): string {
+  return `${formatDateLabel(shift.date)}, ${shift.shiftName} ${shift.startTime}–${shift.endTime}`;
+}
+
+// Convert date+time into a Date object in local time
+function makeDateTime(date: string, time: string): Date {
+  // date "YYYY-MM-DD", time "HH:MM"
   return new Date(`${date}T${time}:00`);
 }
 
+// Adjust end datetime for overnight shifts
 function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
-  const start = toDateTime(shift.date, shift.startTime);
-  let end = toDateTime(shift.date, shift.endTime);
+  const start = makeDateTime(shift.date, shift.startTime);
+  let end = makeDateTime(shift.date, shift.endTime);
 
-  // Overnight shifts: if end <= start, push end to next day
-  if (!isNaN(start.getTime()) && !isNaN(end.getTime()) && end <= start) {
+  // If end is "before" start, treat as overnight (end next day)
+  if (end <= start) {
     end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
   }
 
   return { start, end };
 }
 
-function hoursDiff(later: Date, earlier: Date) {
-  return (later.getTime() - earlier.getTime()) / (1000 * 60 * 60);
+function hoursBetween(a: Date, b: Date): number {
+  return Math.abs(b.getTime() - a.getTime()) / (1000 * 60 * 60);
 }
 
-/**
- * Find the end time of the most recent shift for `doctor` that ends
- * before `referenceStart`, ignoring any shifts in `ignore`.
- */
-function findPreviousShiftEnd(
+// Check if swapping into newShift would create < 12h between any two of doctor’s shifts
+function checkShortTurnaroundsForDoctor(
   allShifts: Shift[],
   doctor: string,
-  referenceStart: Date,
-  ignore: Shift[] = []
-): Date | null {
-  const ends: Date[] = [];
+  oldShift: Shift,
+  newShift: Shift
+): TradeShortTurnaround[] {
+  const relevant = allShifts.filter((s) => s.doctor === doctor);
 
-  for (const s of allShifts) {
-    if (ignore.includes(s)) continue; // pretend this shift doesn't exist
-    if (s.doctor !== doctor) continue;
+  // Remove oldShift (the one they’re giving up) from their list
+  const filtered = relevant.filter(
+    (s) =>
+      !(
+        s.date === oldShift.date &&
+        s.shiftName === oldShift.shiftName &&
+        s.startTime === oldShift.startTime &&
+        s.endTime === oldShift.endTime
+      )
+  );
 
-    const { end } = getShiftDateTimes(s);
-    if (!isNaN(end.getTime()) && end < referenceStart) {
-      ends.push(end);
+  // Add the newShift (the one they would be working instead)
+  const updated = [
+    ...filtered,
+    {
+      ...newShift,
+      doctor, // ensure doctor name matches
+    },
+  ];
+
+  // Sort by start time
+  const withTimes = updated.map((s) => ({
+    shift: s,
+    ...getShiftDateTimes(s),
+  }));
+  withTimes.sort((a, b) => a.start.getTime() - b.start.getTime());
+
+  const problems: TradeShortTurnaround[] = [];
+
+  for (let i = 0; i < withTimes.length - 1; i++) {
+    const current = withTimes[i];
+    const next = withTimes[i + 1];
+
+    const gapHours = (next.start.getTime() - current.end.getTime()) / (1000 * 60 * 60);
+    if (gapHours < 12) {
+      problems.push({
+        doctor,
+        existingShift: current.shift,
+        newShift: next.shift,
+        gapHours,
+      });
     }
   }
 
-  if (!ends.length) return null;
-  ends.sort((a, b) => b.getTime() - a.getTime());
-  return ends[0];
+  return problems;
 }
 
-function formatPreference(contact?: Contact): string {
-  if (!contact) return "No contact info";
-  switch (contact.preferred) {
-    case "email":
-      return "Prefers email";
-    case "sms":
-      return "Prefers SMS";
-    case "either":
-      return "Email or SMS";
-    case "none":
-      if (!contact.email && !contact.phone) return "Prefers not to share";
-      return "Prefers not to share";
-    default:
-      return "No preference set";
+// ---------- Get Together helpers ----------
+
+// "Evening" = 17:00–22:00.
+// Returns true if this shift makes the doctor unavailable in that window.
+function blocksEvening(shift: Shift): boolean {
+  const eveStart = 17 * 60;
+  const eveEnd = 22 * 60;
+
+  const [shStartH, shStartM] = shift.startTime.split(":").map(Number);
+  const [shEndH, shEndM] = shift.endTime.split(":").map(Number);
+
+  const startMinutes = shStartH * 60 + shStartM;
+  const endMinutes = shEndH * 60 + shEndM;
+
+  const overnight = endMinutes < startMinutes; // e.g. 23:00–09:00
+
+  if (!overnight) {
+    // Same-day overlap with [17:00, 22:00)?
+    // 08:00–17:00 is OK (ends exactly at 17:00)
+    if (startMinutes < eveEnd && endMinutes > eveStart) {
+      return true;
+    }
+    return false;
   }
+
+  // Overnight: if it starts before 22:00, it blocks the evening.
+  if (startMinutes < eveEnd) return true;
+
+  // e.g. 22:00–07:00 or 23:00–09:00:
+  // allowed for get-together; we just warn.
+  return false;
 }
 
-export default function Page() {
+// Night shift = starts at or after 22:00
+function isNightShift(shift: Shift): boolean {
+  const [shStartH, shStartM] = shift.startTime.split(":").map(Number);
+  const startMinutes = shStartH * 60 + shStartM;
+  const nightCutoff = 22 * 60; // 22:00
+  return startMinutes >= nightCutoff;
+}
+
+// Minimal all-day ICS builder for a single date
+function buildGetTogetherICS(date: string, doctors: string[]): string {
+  const y = date.slice(0, 4);
+  const m = date.slice(5, 7);
+  const d = date.slice(8, 10);
+
+  return [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Metri-Manager//GetTogether//EN",
+    "BEGIN:VEVENT",
+    `UID:get-together-${date}@metri-manager`,
+    `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, "").split(".")[0]}Z`,
+    `DTSTART;VALUE=DATE:${y}${m}${d}`,
+    `SUMMARY:Get together (${doctors.join(", ")})`,
+    `DESCRIPTION:Get together for ${doctors.join(", ")}`,
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ].join("\r\n");
+}
+
+// ---------- Main Page Component ----------
+
+export default function HomePage() {
+  const [mode, setMode] = useState<Mode>("sameDayTrades");
+
   const [shifts, setShifts] = useState<Shift[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [selectedDoctor, setSelectedDoctor] = useState("");
-  const [selectedShiftIndex, setSelectedShiftIndex] = useState("");
+  // Same-Day Trades state
+  const [selectedDoctor, setSelectedDoctor] = useState<string>("");
+  const [selectedShiftId, setSelectedShiftId] = useState<string>(""); // we’ll use a composite key
+  const [tradeCandidates, setTradeCandidates] = useState<TradeCandidate[]>([]);
+  const [activeTradeOffer, setActiveTradeOffer] = useState<TradeCandidate | null>(null);
 
-  // "Database" of contacts (per doctor), stored in localStorage
-  const [contacts, setContacts] = useState<Record<string, Contact>>({});
+  // Get Together state
+  const [selectedDoctorsForMeet, setSelectedDoctorsForMeet] = useState<string[]>([]);
 
-  // Draft contact info for the currently selected doctor
-  const [contactDraft, setContactDraft] = useState<Contact>({
-    email: "",
-    phone: "",
-    preferred: "none",
-  });
+  // Contacts (optional)
+  const [contacts, setContacts] = useState<Contact[]>([]);
 
-  const [contactSavedMessage, setContactSavedMessage] = useState("");
+  // ---------- Load shifts from /api/schedule ----------
 
-  // Load schedule from API
   useEffect(() => {
-    fetch("/api/schedule")
-      .then((r) => r.json())
-      .then((data) => {
-        if (!Array.isArray(data)) {
-          setError("Could not load schedule.");
-          return;
+    (async () => {
+      try {
+        setLoading(true);
+        setLoadError(null);
+        const res = await fetch("/api/schedule");
+        if (!res.ok) {
+          throw new Error(`Failed to load schedule: ${res.status}`);
         }
-        const sorted = [...data].sort((a, b) =>
-          `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`)
-        );
-        setShifts(sorted);
-      })
-      .catch(() => setError("Could not load schedule."));
+        const data = await res.json();
+        setShifts(data as Shift[]);
+      } catch (err: any) {
+        console.error(err);
+        setLoadError(err?.message || "Failed to load schedule");
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
-  // Load contacts from localStorage on first client render
+  // ---------- Load contacts from /api/contacts (if available) ----------
+
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = window.localStorage.getItem(CONTACTS_STORAGE_KEY);
-      const stored = raw ? (JSON.parse(raw) as Record<string, Contact>) : {};
-      setContacts({ ...SEED_CONTACTS, ...stored });
-    } catch {
-      setContacts({ ...SEED_CONTACTS });
-    }
+    (async () => {
+      try {
+        const res = await fetch("/api/contacts");
+        if (!res.ok) return; // if not set up, silently skip
+        const data = await res.json();
+        setContacts(data as Contact[]);
+      } catch (e) {
+        console.error("Failed to load contacts", e);
+      }
+    })();
   }, []);
 
-  // Persist contacts whenever they change
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const toStore = JSON.stringify(contacts);
-      window.localStorage.setItem(CONTACTS_STORAGE_KEY, toStore);
-    } catch {
-      // ignore
-    }
-  }, [contacts]);
+  const contactMap = useMemo(
+    () => new Map(contacts.map((c) => [c.doctor_name, c])),
+    [contacts]
+  );
 
-  // All doctor names (from schedule)
-  const doctors = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          shifts
-            .map((s) => (s.doctor || "").trim())
-            .filter((name) => name.length > 0)
-        )
-      ).sort((a, b) => a.localeCompare(b)),
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  // ---------- Derived data ----------
+
+  const allDoctors = useMemo(
+    () => Array.from(new Set(shifts.map((s) => s.doctor))).sort(),
     [shifts]
   );
 
-  // When doctor changes, update contactDraft from "database"
+  // For Same-Day mode: doctor’s future shifts, each with a composite ID
+  const myFutureShifts = useMemo(() => {
+    if (!selectedDoctor) return [];
+    return shifts
+      .filter((s) => s.doctor === selectedDoctor && s.date >= todayStr)
+      .sort((a, b) => {
+        if (a.date === b.date) return a.startTime.localeCompare(b.startTime);
+        return a.date.localeCompare(b.date);
+      })
+      .map((s) => ({
+        ...s,
+        id: `${s.date}__${s.shiftName}__${s.startTime}__${s.endTime}__${s.doctor}`,
+      }));
+  }, [shifts, selectedDoctor, todayStr]);
+
+  const selectedMyShift = useMemo(() => {
+    if (!selectedShiftId) return null;
+    const found = myFutureShifts.find((s) => s.id === selectedShiftId);
+    return found || null;
+  }, [myFutureShifts, selectedShiftId]);
+
+  // ---------- Compute same-day trade candidates when my shift changes ----------
+
   useEffect(() => {
-    setContactSavedMessage("");
-    if (!selectedDoctor) {
-      setContactDraft({ email: "", phone: "", preferred: "none" });
+    if (!selectedMyShift) {
+      setTradeCandidates([]);
+      setActiveTradeOffer(null);
       return;
     }
-    const existing = contacts[selectedDoctor];
-    setContactDraft({
-      email: existing?.email || "",
-      phone: existing?.phone || "",
-      preferred: existing?.preferred || "none",
-    });
-  }, [selectedDoctor, contacts]);
+    const myShift = selectedMyShift as Shift & { id: string };
 
-  // FUTURE shifts for selected doctor only
-  const doctorShifts = useMemo(() => {
-    if (!selectedDoctor) return [];
+    // Other shifts on the same date (different doctors)
+    const sameDayShifts = shifts.filter(
+      (s) => s.date === myShift.date && s.doctor !== myShift.doctor
+    );
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0); // midnight today
-
-    return shifts
-      .map((s, index) => ({ s, index }))
-      .filter(({ s }) => {
-        const docMatches =
-          (s.doctor || "").trim().toLowerCase() ===
-          selectedDoctor.trim().toLowerCase();
-        if (!docMatches) return false;
-
-        const shiftDate = new Date(s.date + "T00:00:00");
-        return shiftDate >= today;
-      });
-  }, [selectedDoctor, shifts]);
-
-  const myShift =
-    selectedShiftIndex === "" ? null : shifts[parseInt(selectedShiftIndex, 10)];
-
-  const sameDayShifts = useMemo(() => {
-    if (!myShift) return [];
-    return shifts.filter((s) => s.date === myShift.date);
-  }, [myShift, shifts]);
-
-  const tradeOptions = useMemo(() => {
-    if (!myShift) return [];
-
-    const { start: myStart } = getShiftDateTimes(myShift);
-    const myDoctor = myShift.doctor;
-
-    return sameDayShifts
-      .filter((s) => s !== myShift)
-      .map((candidate) => {
-        const { start: theirStart } = getShiftDateTimes(candidate);
-
-        let myShort = false;
-        let theirShort = false;
-
-        // Scenario A: YOU take THEIR shift – ignore your original shift.
-        const myPrev = findPreviousShiftEnd(shifts, myDoctor, theirStart, [
-          myShift,
-        ]);
-        if (myPrev) {
-          const gap = hoursDiff(theirStart, myPrev);
-          if (gap < 12) myShort = true;
-        }
-
-        // Scenario B: THEY take YOUR shift – ignore their original shift.
-        const theirPrev = findPreviousShiftEnd(
-          shifts,
-          candidate.doctor,
-          myStart,
-          [candidate]
-        );
-        if (theirPrev) {
-          const gap = hoursDiff(myStart, theirPrev);
-          if (gap < 12) theirShort = true;
-        }
-
-        return {
-          candidate,
-          myShort,
-          theirShort,
-          hasShort: myShort || theirShort,
-        };
-      });
-  }, [myShift, sameDayShifts, shifts]);
-
-  const myContact: Contact | undefined =
-    selectedDoctor && contacts[selectedDoctor]
-      ? contacts[selectedDoctor]
-      : undefined;
-
-  const myEmail = myContact?.email || "";
-  const myPhone = myContact?.phone || "";
-
-  // Build the message body for email/SMS
-  const buildOfferMessage = (candidate: Shift) => {
-    if (!myShift) return "";
-
-    const meName = selectedDoctor || "Unknown doctor";
-    const meLabel = meName ? `Dr. ${meName}` : "Unknown doctor";
-
-    const myShiftStr = `${myShift.date} ${myShift.shiftName} ${myShift.startTime}–${myShift.endTime}`;
-    const theirShiftStr = `${candidate.date} ${candidate.shiftName} ${candidate.startTime}–${candidate.endTime}`;
-
-    const contactBits = [myEmail, myPhone].filter(Boolean).join(" / ");
-    const contactLine = contactBits
-      ? `Please contact ${meLabel} at ${contactBits} if you're interested.`
-      : `Please contact ${meLabel} if you're interested.`;
-
-    return `You've got a SAME-DAY SHIFT TRADE OFFER from ${meLabel}!
-
-${meLabel} would like to trade:
-
-  THEIR shift: ${myShiftStr}
-  FOR your shift: ${theirShiftStr}
-
-${contactLine}
-
-(Generated by the Metri-Manager – mode: Same-Day Trades.)`;
-  };
-
-  // Email offer
-  const handleSendEmailOffer = (candidate: Shift) => {
-    if (!myShift) return;
-
-    const message = buildOfferMessage(candidate);
-    if (!message) return;
-
-    const meName = selectedDoctor || "Unknown doctor";
-    const meLabel = meName ? `Dr. ${meName}` : "Unknown doctor";
-    const otherName = candidate.doctor;
-
-    const otherContact = contacts[otherName];
-    const otherEmail = otherContact?.email ?? "";
-    const myEmailForSend = myEmail;
-
-    // Communicate preference before sending
-    if (otherContact) {
-      if (otherContact.preferred === "sms") {
-        const proceed = window.confirm(
-          `Note: Dr. ${otherName} prefers SMS. Do you still want to start an email?`
-        );
-        if (!proceed) return;
-      } else if (otherContact.preferred === "none") {
-        const proceed = window.confirm(
-          `Note: Dr. ${otherName} prefers not to share contact info.\nYou may want to coordinate in person or via internal messaging.\n\nDo you still want to proceed with an email (if possible)?`
-        );
-        if (!proceed) return;
-      }
-    }
-
-    if (otherEmail || myEmailForSend) {
-      const to = otherEmail || myEmailForSend;
-      const ccParam =
-        otherEmail && myEmailForSend && otherEmail !== myEmailForSend
-          ? `&cc=${encodeURIComponent(myEmailForSend)}`
-          : "";
-      const subject = encodeURIComponent(
-        `SAME-DAY SHIFT TRADE OFFER from ${meLabel}`
+    const candidates: TradeCandidate[] = sameDayShifts.map((otherShift) => {
+      // Check me: I give up myShift, I take otherShift
+      const meProblems = checkShortTurnaroundsForDoctor(
+        shifts,
+        myShift.doctor,
+        myShift,
+        otherShift
       );
-      const body = encodeURIComponent(message);
-      const mailto = `mailto:${encodeURIComponent(
-        to
-      )}?subject=${subject}${ccParam}&body=${body}`;
-      window.location.href = mailto;
-    } else {
-      // Fallback: copy to clipboard
-      if (navigator.clipboard) {
-        navigator.clipboard
-          .writeText(message)
-          .then(() => {
-            alert(
-              "Trade offer text copied to clipboard.\nPaste it into an email."
-            );
-          })
-          .catch(() => {
-            alert(message);
-          });
-      } else {
-        alert(message);
-      }
-    }
-  };
 
-  // SMS offer
-  const handleSendSmsOffer = (candidate: Shift) => {
-    if (!myShift) return;
+      // Check them: they give up otherShift, they take myShift
+      const themProblems = checkShortTurnaroundsForDoctor(
+        shifts,
+        otherShift.doctor,
+        otherShift,
+        myShift
+      );
 
-    const message = buildOfferMessage(candidate);
-    if (!message) return;
+      return {
+        otherShift,
+        shortTurnarounds: [...meProblems, ...themProblems],
+      };
+    });
 
-    const meName = selectedDoctor || "Unknown doctor";
-    const otherName = candidate.doctor;
+    setTradeCandidates(candidates);
+    setActiveTradeOffer(null);
+  }, [selectedMyShift, shifts]);
 
-    const otherContact = contacts[otherName];
-    const otherPhone = otherContact?.phone ?? "";
-    const myPhoneForSend = myPhone;
+  // ---------- Get Together dates computation ----------
 
-    // Communicate preference before sending
-    if (otherContact) {
-      if (otherContact.preferred === "email") {
-        const proceed = window.confirm(
-          `Note: Dr. ${otherName} prefers email. Do you still want to start an SMS?`
-        );
-        if (!proceed) return;
-      } else if (otherContact.preferred === "none") {
-        const proceed = window.confirm(
-          `Note: Dr. ${otherName} prefers not to share contact info.\nYou may want to coordinate in person or via internal messaging.\n\nDo you still want to proceed with SMS (if possible)?`
-        );
-        if (!proceed) return;
-      }
+  const getTogetherDates: GetTogetherDate[] = useMemo(() => {
+    if (mode !== "getTogether") return [];
+    const selected = selectedDoctorsForMeet;
+    if (selected.length === 0) return [];
+
+    // Group shifts by date
+    const byDate: Record<string, Shift[]> = {};
+    for (const s of shifts) {
+      if (!byDate[s.date]) byDate[s.date] = [];
+      byDate[s.date].push(s);
     }
 
-    if (otherPhone || myPhoneForSend) {
-      const to = otherPhone || myPhoneForSend;
-      const smsUrl = `sms:${encodeURIComponent(
-        to
-      )}?body=${encodeURIComponent(message)}`;
-      window.location.href = smsUrl;
-    } else {
-      if (navigator.clipboard) {
-        navigator.clipboard
-          .writeText(message)
-          .then(() => {
-            alert(
-              "Trade offer text copied to clipboard.\nPaste it into your SMS/texting app."
-            );
-          })
-          .catch(() => {
-            alert(message);
-          });
-      } else {
-        alert(message);
+    const allDates = Object.keys(byDate).sort();
+
+    const result: GetTogetherDate[] = [];
+
+    for (const date of allDates) {
+      if (date < todayStr) continue; // only future dates
+
+      const dayShifts = byDate[date];
+
+      let allFree = true;
+      const nightsForThisDate: GetTogetherDate["nights"] = [];
+
+      for (const doc of selected) {
+        const docShifts = dayShifts.filter((s) => s.doctor === doc);
+
+        for (const s of docShifts) {
+          if (blocksEvening(s)) {
+            allFree = false;
+            break;
+          }
+          if (isNightShift(s)) {
+            nightsForThisDate.push({
+              doctor: doc,
+              shiftName: s.shiftName,
+              startTime: s.startTime,
+              endTime: s.endTime,
+            });
+          }
+        }
+
+        if (!allFree) break;
+      }
+
+      if (allFree) {
+        result.push({ date, nights: nightsForThisDate });
       }
     }
-  };
 
-  // Save contact info for selected doctor
-  const handleSaveContact = () => {
-    if (!selectedDoctor) return;
-    setContacts((prev) => ({
-      ...prev,
-      [selectedDoctor]: {
-        email: contactDraft.email.trim(),
-        phone: contactDraft.phone.trim(),
-        preferred: contactDraft.preferred,
-      },
-    }));
-    setContactSavedMessage("Contact information saved.");
-    setTimeout(() => setContactSavedMessage(""), 3000);
-  };
+    return result;
+  }, [mode, selectedDoctorsForMeet, shifts, todayStr]);
 
-  const myPreferenceText = myContact
-    ? formatPreference(myContact)
-    : "No contact info saved for you yet.";
+  // ---------- Actions: Same-Day trade message ----------
+
+  function buildSameDayTradeMessage(me: string, myShift: Shift, theirShift: Shift): string {
+    const meLabel = `Dr. ${me}`;
+    return (
+      `You've got a SAME-DAY SHIFT TRADE OFFER from ${meLabel}!\n\n` +
+      `${meLabel} would like to trade:\n\n` +
+      `  THEIR shift: ${formatShiftLabel(myShift)}\n` +
+      `  FOR your shift: ${formatShiftLabel(theirShift)}\n\n` +
+      `Please contact ${meLabel} if you're interested.\n\n` +
+      `(Generated by the Metri-Manager – mode: Same-Day Trades.)`
+    );
+  }
+
+  function handlePrepareTradeOffer(candidate: TradeCandidate) {
+    setActiveTradeOffer(candidate);
+  }
+
+  // ---------- Actions: Get Together emails ----------
+
+  function handleEmailGetTogetherList() {
+    if (getTogetherDates.length === 0 || selectedDoctorsForMeet.length === 0) return;
+
+    const recipients = selectedDoctorsForMeet
+      .map((doc) => contactMap.get(doc)?.email)
+      .filter(Boolean) as string[];
+
+    const to = recipients.join(",");
+
+    const dateLines = getTogetherDates
+      .map(({ date, nights }) => {
+        const label = formatDateLabel(date);
+        const nightsText =
+          nights.length > 0
+            ? ` (Night shifts: ${nights
+                .map(
+                  (n) =>
+                    `${n.doctor} ${n.shiftName} ${n.startTime}–${n.endTime}`
+                )
+                .join(", ")})`
+            : "";
+        return `- ${label}${nightsText}`;
+      })
+      .join("\n");
+
+    const subject = encodeURIComponent(
+      `Get Together – Free evenings for ${selectedDoctorsForMeet.join(", ")}`
+    );
+
+    const body = encodeURIComponent(
+      `Hi everyone,\n\nHere are potential evenings when everyone is free after 17:00:\n\n${dateLines}\n\nGenerated by Metri-Manager – mode: Get Together.`
+    );
+
+    const mailto = `mailto:${encodeURIComponent(to)}?subject=${subject}&body=${body}`;
+    window.location.href = mailto;
+  }
+
+  // ---------- Render ----------
 
   return (
-    <div style={{ padding: "1rem", maxWidth: 900, margin: "0 auto" }}>
-      <h1>Same-Day Trades</h1>
-      <p style={{ fontStyle: "italic", color: "#555" }}>
-        Mode: <strong>Same-Day Trades</strong> (future modes: Lunch, Snacks,
-        Beer, Evening Out)
-      </p>
-      <p>
-        1) Choose <strong>your name</strong> and confirm your contact info.
-        2) Choose one of <strong>your future shifts</strong>. The app shows who
-        else works that day and flags trades that create a{" "}
-        <strong>SHORT TURNAROUND (&lt; 12h)</strong> for either doctor.
+    <main style={{ maxWidth: 800, margin: "0 auto", padding: "1rem" }}>
+      <h1>Metri-Manager</h1>
+      <p style={{ marginBottom: "1rem" }}>
+        SBH Shift Helper – Same-Day Trades &amp; Get Together planning.
       </p>
 
-      {error && <p style={{ color: "red" }}>{error}</p>}
-
-      <hr />
-
-      {/* Doctor dropdown */}
-      <h2>1. Pick your name</h2>
-      {doctors.length === 0 && !error && <p>Loading…</p>}
-      {doctors.length > 0 && (
-        <select
-          value={selectedDoctor}
-          onChange={(e) => {
-            setSelectedDoctor(e.target.value);
-            setSelectedShiftIndex("");
+      {/* Mode toggle */}
+      <div style={{ marginBottom: "1rem", display: "flex", gap: "0.5rem" }}>
+        <button
+          type="button"
+          onClick={() => setMode("sameDayTrades")}
+          style={{
+            padding: "0.4rem 0.8rem",
+            borderRadius: 999,
+            border: "1px solid #ccc",
+            background: mode === "sameDayTrades" ? "#1d4ed8" : "#eee",
+            color: mode === "sameDayTrades" ? "#fff" : "#000",
+            cursor: "pointer",
           }}
-          style={{ width: "100%", padding: "0.5rem" }}
         >
-          <option value="">-- Choose your name --</option>
-          {doctors.map((doc) => (
-            <option key={doc} value={doc}>
-              {doc}
-            </option>
-          ))}
-        </select>
-      )}
-
-      {/* Contact registration / editing for selected doctor */}
-      {selectedDoctor && (
-        <>
-          <hr />
-          <h2>Contact registration for Metri-Manager</h2>
-          <p>
-            You are editing contact info for:{" "}
-            <strong>Dr. {selectedDoctor}</strong>
-          </p>
-          <p style={{ fontSize: "0.9rem", color: "#555" }}>
-            Your current preference: <strong>{myPreferenceText}</strong>
-          </p>
-          <div style={{ marginBottom: "0.5rem" }}>
-            <label>
-              Email:&nbsp;
-              <input
-                type="email"
-                value={contactDraft.email}
-                onChange={(e) =>
-                  setContactDraft((c) => ({
-                    ...c,
-                    email: e.target.value,
-                  }))
-                }
-                style={{ width: "100%", maxWidth: 400 }}
-                placeholder="you@example.com"
-              />
-            </label>
-          </div>
-          <div style={{ marginBottom: "0.5rem" }}>
-            <label>
-              Phone (optional):&nbsp;
-              <input
-                type="tel"
-                value={contactDraft.phone}
-                onChange={(e) =>
-                  setContactDraft((c) => ({
-                    ...c,
-                    phone: e.target.value,
-                  }))
-                }
-                style={{ width: "100%", maxWidth: 400 }}
-                placeholder="+1-204-555-1234"
-              />
-            </label>
-          </div>
-          <div style={{ marginBottom: "0.5rem" }}>
-            <span>Preferred notification method:&nbsp;</span>
-            <label>
-              <input
-                type="radio"
-                name="preferred"
-                value="email"
-                checked={contactDraft.preferred === "email"}
-                onChange={() =>
-                  setContactDraft((c) => ({ ...c, preferred: "email" }))
-                }
-              />
-              &nbsp;Email
-            </label>
-            &nbsp;&nbsp;
-            <label>
-              <input
-                type="radio"
-                name="preferred"
-                value="sms"
-                checked={contactDraft.preferred === "sms"}
-                onChange={() =>
-                  setContactDraft((c) => ({ ...c, preferred: "sms" }))
-                }
-              />
-              &nbsp;SMS
-            </label>
-            &nbsp;&nbsp;
-            <label>
-              <input
-                type="radio"
-                name="preferred"
-                value="either"
-                checked={contactDraft.preferred === "either"}
-                onChange={() =>
-                  setContactDraft((c) => ({ ...c, preferred: "either" }))
-                }
-              />
-              &nbsp;Either
-            </label>
-            &nbsp;&nbsp;
-            <label>
-              <input
-                type="radio"
-                name="preferred"
-                value="none"
-                checked={contactDraft.preferred === "none"}
-                onChange={() =>
-                  setContactDraft((c) => ({ ...c, preferred: "none" }))
-                }
-              />
-              &nbsp;I prefer not to share
-            </label>
-          </div>
-          <button
-            type="button"
-            onClick={handleSaveContact}
-            style={{ padding: "0.4rem 0.8rem", marginBottom: "0.5rem" }}
-          >
-            Save contact info
-          </button>
-          {contactSavedMessage && (
-            <div style={{ color: "green", marginBottom: "0.5rem" }}>
-              {contactSavedMessage}
-            </div>
-          )}
-          <p style={{ fontSize: "0.9rem", color: "#555" }}>
-            By entering my email and/or phone number and clicking Save, I
-            consent to this site storing my contact information so that other
-            users can contact me for shift trades.
-          </p>
-        </>
-      )}
-
-      <hr />
-
-      {/* Shift dropdown */}
-      <h2>2. Pick one of your future shifts</h2>
-      {!selectedDoctor && <p>Select your name first.</p>}
-
-      {selectedDoctor && doctorShifts.length === 0 && (
-        <p>No future shifts found for {selectedDoctor}.</p>
-      )}
-
-      {selectedDoctor && doctorShifts.length > 0 && (
-        <select
-          value={selectedShiftIndex}
-          onChange={(e) => setSelectedShiftIndex(e.target.value)}
-          style={{ width: "100%", padding: "0.5rem" }}
+          Same-Day Trades
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode("getTogether")}
+          style={{
+            padding: "0.4rem 0.8rem",
+            borderRadius: 999,
+            border: "1px solid #ccc",
+            background: mode === "getTogether" ? "#1d4ed8" : "#eee",
+            color: mode === "getTogether" ? "#fff" : "#000",
+            cursor: "pointer",
+          }}
         >
-          <option value="">-- Choose a shift --</option>
-          {doctorShifts.map(({ s, index }) => {
-            const date = s.date || "????-??-??";
-            const name = s.shiftName || "Unknown";
-            const start = s.startTime || "??:??";
-            const end = s.endTime || "??:??";
+          Get Together
+        </button>
+      </div>
 
-            const label = `${date} ${name} ${start}–${end}`;
+      {loading && <p>Loading schedule…</p>}
+      {loadError && <p style={{ color: "red" }}>{loadError}</p>}
 
-            return (
-              <option key={index} value={index}>
-                {label}
-              </option>
-            );
-          })}
-        </select>
-      )}
-
-      <hr />
-
-      <h2>Shifts on that day</h2>
-      {!myShift && <p>Choose one of your shifts above.</p>}
-      {myShift && (
+      {!loading && !loadError && (
         <>
-          <p>
-            <strong>Your shift:</strong> {myShift.date} {myShift.shiftName} (
-            {myShift.startTime}–{myShift.endTime})
-          </p>
-          <div style={{ overflowX: "auto" }}>
-            <table
-              border={1}
-              cellPadding={4}
-              style={{ borderCollapse: "collapse", minWidth: 400 }}
+          {/* SAME-DAY TRADES MODE */}
+          {mode === "sameDayTrades" && (
+            <section
+              style={{
+                border: "1px solid #ddd",
+                borderRadius: 8,
+                padding: "1rem",
+                marginBottom: "1.5rem",
+              }}
             >
-              <thead>
-                <tr>
-                  <th>Shift</th>
-                  <th>Doctor</th>
-                  <th>Start</th>
-                  <th>End</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sameDayShifts.map((s, i) => (
-                  <tr key={i}>
-                    <td>{s.shiftName}</td>
-                    <td>{s.doctor}</td>
-                    <td>{s.startTime}</td>
-                    <td>{s.endTime}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
+              <h2>Same-Day Trades</h2>
+              <p>
+                Choose your name, then one of your future shifts. I’ll list all
+                other shifts on that same day and flag any trades that would
+                create a short turnaround (&lt; 12 hours between shifts for
+                either doctor).
+              </p>
 
-      <hr />
+              {/* Doctor selection */}
+              <div style={{ marginTop: "1rem", marginBottom: "0.5rem" }}>
+                <label>
+                  Your name:{" "}
+                  <select
+                    value={selectedDoctor}
+                    onChange={(e) => {
+                      setSelectedDoctor(e.target.value);
+                      setSelectedShiftId("");
+                      setTradeCandidates([]);
+                      setActiveTradeOffer(null);
+                    }}
+                  >
+                    <option value="">Select your name</option>
+                    {allDoctors.map((doc) => (
+                      <option key={doc} value={doc}>
+                        {doc}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
 
-      <h2>Trade analysis</h2>
-      {!myShift && (
-        <p>Select a shift above to see potential trade risks.</p>
-      )}
+              {/* Shift selection */}
+              {selectedDoctor && (
+                <div style={{ marginBottom: "1rem" }}>
+                  <label>
+                    Your future shifts:{" "}
+                    <select
+                      value={selectedShiftId}
+                      onChange={(e) => {
+                        setSelectedShiftId(e.target.value);
+                        setActiveTradeOffer(null);
+                      }}
+                    >
+                      <option value="">Select a shift</option>
+                      {myFutureShifts.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {formatDateLabel(s.date)}, {s.shiftName}{" "}
+                          {s.startTime}–{s.endTime}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {myFutureShifts.length === 0 && (
+                    <p style={{ fontSize: "0.9rem" }}>
+                      No future shifts found for {selectedDoctor}.
+                    </p>
+                  )}
+                </div>
+              )}
 
-      {myShift && tradeOptions.length === 0 && (
-        <p>No other shifts on that day.</p>
-      )}
+              {/* Trade candidates */}
+              {selectedMyShift && (
+                <div>
+                  <h3>Potential same-day trades on {formatDateLabel(selectedMyShift.date)}</h3>
+                  {tradeCandidates.length === 0 && (
+                    <p>No other shifts found on this day.</p>
+                  )}
+                  {tradeCandidates.length > 0 && (
+                    <table
+                      style={{
+                        width: "100%",
+                        borderCollapse: "collapse",
+                        marginBottom: "1rem",
+                      }}
+                    >
+                      <thead>
+                        <tr>
+                          <th
+                            style={{
+                              borderBottom: "1px solid #ccc",
+                              textAlign: "left",
+                              padding: "0.25rem",
+                            }}
+                          >
+                            Doctor
+                          </th>
+                          <th
+                            style={{
+                              borderBottom: "1px solid #ccc",
+                              textAlign: "left",
+                              padding: "0.25rem",
+                            }}
+                          >
+                            Shift
+                          </th>
+                          <th
+                            style={{
+                              borderBottom: "1px solid #ccc",
+                              textAlign: "left",
+                              padding: "0.25rem",
+                            }}
+                          >
+                            Status
+                          </th>
+                          <th
+                            style={{
+                              borderBottom: "1px solid #ccc",
+                              textAlign: "left",
+                              padding: "0.25rem",
+                            }}
+                          >
+                            Actions
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {tradeCandidates.map((cand) => {
+                          const hasShort = cand.shortTurnarounds.length > 0;
+                          return (
+                            <tr key={`${cand.otherShift.doctor}-${cand.otherShift.shiftName}`}>
+                              <td
+                                style={{
+                                  borderBottom: "1px solid #eee",
+                                  padding: "0.25rem",
+                                }}
+                              >
+                                {cand.otherShift.doctor}
+                              </td>
+                              <td
+                                style={{
+                                  borderBottom: "1px solid #eee",
+                                  padding: "0.25rem",
+                                }}
+                              >
+                                {cand.otherShift.shiftName}{" "}
+                                {cand.otherShift.startTime}–{cand.otherShift.endTime}
+                              </td>
+                              <td
+                                style={{
+                                  borderBottom: "1px solid #eee",
+                                  padding: "0.25rem",
+                                  color: hasShort ? "#b91c1c" : "#166534",
+                                  fontSize: "0.9rem",
+                                }}
+                              >
+                                {hasShort ? "SHORT TURNAROUND" : "OK"}
+                              </td>
+                              <td
+                                style={{
+                                  borderBottom: "1px solid #eee",
+                                  padding: "0.25rem",
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => handlePrepareTradeOffer(cand)}
+                                  style={{
+                                    padding: "0.2rem 0.5rem",
+                                    fontSize: "0.8rem",
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  Prepare offer
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
 
-      {myShift && tradeOptions.length > 0 && (
-        <div style={{ overflowX: "auto" }}>
-          <table
-            border={1}
-            cellPadding={4}
-            style={{ borderCollapse: "collapse", minWidth: 650 }}
-          >
-            <thead>
-              <tr>
-                <th>Candidate Shift</th>
-                <th>Doctor</th>
-                <th>Start</th>
-                <th>End</th>
-                <th>Contact preference</th>
-                <th>Turnaround Risk</th>
-                <th>Send offer</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tradeOptions.map((t, i) => {
-                const otherContact = contacts[t.candidate.doctor];
-                const prefText = formatPreference(otherContact);
-                return (
-                  <tr key={i}>
-                    <td>{t.candidate.shiftName}</td>
-                    <td>{t.candidate.doctor}</td>
-                    <td>{t.candidate.startTime}</td>
-                    <td>{t.candidate.endTime}</td>
-                    <td>{prefText}</td>
-                    <td style={{ color: t.hasShort ? "red" : "green" }}>
-                      {t.hasShort
-                        ? `SHORT TURNAROUND ${
-                            t.myShort ? "(for YOU) " : ""
-                          }${t.theirShort ? "(for THEM)" : ""}`
-                        : "OK (≥ 12h each)"}
-                    </td>
-                    <td>
-                      <div
+                  {/* Detail of short turnarounds for selected candidate */}
+                  {activeTradeOffer && (
+                    <div
+                      style={{
+                        borderTop: "1px solid #ddd",
+                        paddingTop: "0.75rem",
+                        marginTop: "0.75rem",
+                      }}
+                    >
+                      <h3>Trade Offer Message</h3>
+                      {activeTradeOffer.shortTurnarounds.length > 0 && (
+                        <div style={{ marginBottom: "0.5rem", color: "#b91c1c" }}>
+                          <strong>Warning:</strong> This trade creates short turnarounds:
+                          <ul>
+                            {activeTradeOffer.shortTurnarounds.map((st, i) => (
+                              <li key={i}>
+                                {st.doctor}: {formatShiftLabel(st.existingShift)} →{" "}
+                                {formatShiftLabel(st.newShift)} (gap ≈{" "}
+                                {st.gapHours.toFixed(1)} h)
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      <p style={{ fontSize: "0.9rem" }}>
+                        Below is an auto-generated message you can copy/paste into email or
+                        text:
+                      </p>
+                      <textarea
+                        readOnly
+                        value={
+                          selectedMyShift
+                            ? buildSameDayTradeMessage(
+                                selectedMyShift.doctor,
+                                selectedMyShift,
+                                activeTradeOffer.otherShift
+                              )
+                            : ""
+                        }
                         style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "0.25rem",
+                          width: "100%",
+                          height: "8rem",
+                          fontFamily: "monospace",
+                          fontSize: "0.85rem",
+                        }}
+                      />
+
+                      {/* Email link if we have their email */}
+                      {(() => {
+                        if (!selectedMyShift) return null;
+                        const meName = selectedMyShift.doctor;
+                        const themName = activeTradeOffer.otherShift.doctor;
+                        const contact = contactMap.get(themName);
+                        const msg = buildSameDayTradeMessage(
+                          meName,
+                          selectedMyShift,
+                          activeTradeOffer.otherShift
+                        );
+                        const subject = encodeURIComponent(
+                          `Same-day shift trade offer from Dr. ${meName}`
+                        );
+                        const body = encodeURIComponent(msg);
+
+                        if (contact?.email) {
+                          const mailto = `mailto:${encodeURIComponent(
+                            contact.email
+                          )}?subject=${subject}&body=${body}`;
+                          return (
+                            <div style={{ marginTop: "0.5rem" }}>
+                              <a href={mailto}>Email this offer to {themName}</a>
+                            </div>
+                          );
+                        }
+                        return (
+                          <p style={{ marginTop: "0.5rem", fontSize: "0.85rem" }}>
+                            No email on file for {themName}. Copy the text above into your
+                            preferred app.
+                          </p>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* GET TOGETHER MODE */}
+          {mode === "getTogether" && (
+            <section
+              style={{
+                border: "1px solid #ddd",
+                borderRadius: 8,
+                padding: "1rem",
+                marginBottom: "1.5rem",
+              }}
+            >
+              <h2>Get Together – Free Evenings After 17:00</h2>
+              <p>
+                Select doctors below. I’ll show future dates where all of them are free
+                after 17:00. If someone is on a night shift (start ≥ 22:00), I’ll flag it
+                with a warning.
+              </p>
+
+              {/* Multi-select doctors */}
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.5rem",
+                  marginTop: "0.75rem",
+                  marginBottom: "0.75rem",
+                }}
+              >
+                {allDoctors.map((doc) => {
+                  const checked = selectedDoctorsForMeet.includes(doc);
+                  return (
+                    <label
+                      key={doc}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.25rem",
+                        padding: "0.25rem 0.5rem",
+                        borderRadius: 999,
+                        border: "1px solid #ddd",
+                        background: checked ? "#1d4ed8" : "#f9fafb",
+                        color: checked ? "#fff" : "#000",
+                        fontSize: "0.85rem",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedDoctorsForMeet((prev) =>
+                              [...prev, doc].sort()
+                            );
+                          } else {
+                            setSelectedDoctorsForMeet((prev) =>
+                              prev.filter((d) => d !== doc)
+                            );
+                          }
+                        }}
+                        style={{ accentColor: "#1d4ed8" }}
+                      />
+                      <span>{doc}</span>
+                    </label>
+                  );
+                })}
+              </div>
+
+              {/* Results */}
+              <div>
+                {selectedDoctorsForMeet.length === 0 && (
+                  <p>Select one or more doctors above to see free evenings.</p>
+                )}
+
+                {selectedDoctorsForMeet.length > 0 &&
+                  getTogetherDates.length === 0 && (
+                    <p>
+                      No future dates found where all selected doctors are free after
+                      17:00.
+                    </p>
+                  )}
+
+                {selectedDoctorsForMeet.length > 0 && getTogetherDates.length > 0 && (
+                  <>
+                    <div style={{ marginBottom: "0.5rem" }}>
+                      <button
+                        type="button"
+                        onClick={handleEmailGetTogetherList}
+                        style={{
+                          padding: "0.3rem 0.7rem",
+                          fontSize: "0.85rem",
+                          cursor: "pointer",
                         }}
                       >
-                        <button
-                          type="button"
-                          onClick={() => handleSendEmailOffer(t.candidate)}
-                          style={{ padding: "0.25rem 0.5rem" }}
-                        >
-                          Email / copy
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleSendSmsOffer(t.candidate)}
-                          style={{ padding: "0.25rem 0.5rem" }}
-                        >
-                          SMS / copy
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                        Email these dates to the group
+                      </button>
+                    </div>
+
+                    <h3>Potential Get-Together Evenings</h3>
+                    <ul style={{ listStyle: "none", paddingLeft: 0 }}>
+                      {getTogetherDates.map(({ date, nights }) => {
+                        const label = formatDateLabel(date);
+                        const ics = buildGetTogetherICS(
+                          date,
+                          selectedDoctorsForMeet
+                        );
+                        const icsHref = `data:text/calendar;charset=utf-8,${encodeURIComponent(
+                          ics
+                        )}`;
+
+                        const handleEmailSingleDate = () => {
+                          const recipients = selectedDoctorsForMeet
+                            .map((doc) => contactMap.get(doc)?.email)
+                            .filter(Boolean) as string[];
+
+                          const to = recipients.join(",");
+
+                          const nightsText =
+                            nights.length > 0
+                              ? `Note: Night shifts on this date: ${nights
+                                  .map(
+                                    (n) =>
+                                      `${n.doctor} ${n.shiftName} ${n.startTime}–${n.endTime}`
+                                  )
+                                  .join(", ")}.`
+                              : "";
+
+                          const subject = encodeURIComponent(
+                            `Get Together – ${label}`
+                          );
+
+                          const body = encodeURIComponent(
+                            `Hi everyone,\n\nHow about a get-together on ${label}?\n\n${nightsText}\n\n(You can add the attached .ics event to your calendar.)\n\nGenerated by Metri-Manager – mode: Get Together.`
+                          );
+
+                          const mailto = `mailto:${encodeURIComponent(
+                            to
+                          )}?subject=${subject}&body=${body}`;
+                          window.location.href = mailto;
+                        };
+
+                        return (
+                          <li
+                            key={date}
+                            style={{
+                              borderBottom: "1px solid #eee",
+                              padding: "0.5rem 0",
+                            }}
+                          >
+                            <div>{label}</div>
+                            {nights.length > 0 && (
+                              <div
+                                style={{
+                                  fontSize: "0.8rem",
+                                  color: "#b45309",
+                                  marginTop: "0.15rem",
+                                }}
+                              >
+                                ⚠ Night shift on this date:&nbsp;
+                                {nights
+                                  .map(
+                                    (n) =>
+                                      `${n.doctor} (${n.shiftName} ${n.startTime}–${n.endTime})`
+                                  )
+                                  .join(", ")}
+                              </div>
+                            )}
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: "0.5rem",
+                                marginTop: "0.35rem",
+                                fontSize: "0.85rem",
+                              }}
+                            >
+                              <a href={icsHref} download={`get-together-${date}.ics`}>
+                                Download .ics
+                              </a>
+                              <button
+                                type="button"
+                                onClick={handleEmailSingleDate}
+                                style={{
+                                  padding: "0.2rem 0.5rem",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Email this date to group
+                              </button>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </>
+                )}
+              </div>
+            </section>
+          )}
+        </>
       )}
-    </div>
+    </main>
   );
 }
