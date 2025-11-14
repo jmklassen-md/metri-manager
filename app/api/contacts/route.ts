@@ -3,7 +3,7 @@ import {
   getAllContacts,
   getContact,
   upsertContact,
-} from "@/lib/db";
+} from "../../../lib/db";
 
 // GET /api/contacts
 // Optional: ?doctor=Klassen  -> returns single contact
