@@ -79,10 +79,9 @@ function hoursBetween(a: Date, b: Date): number {
   return Math.abs(b.getTime() - a.getTime()) / (1000 * 60 * 60);
 }
 
-// Time helpers for Get Together logic
-function toMinutes(time: string): number {
-  const [h, m] = time.split(":").map(Number);
-  return h * 60 + m;
+// Interval overlap check
+function intervalsOverlap(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date) {
+  return aStart < bEnd && aEnd > bStart;
 }
 
 function previousDateStr(date: string): string {
@@ -175,24 +174,22 @@ export default function HomePage() {
   );
 
   const todayStr = new Date().toISOString().slice(0, 10);
-  const now = new Date();
 
   const allDoctors = useMemo(
     () => Array.from(new Set(shifts.map((s) => s.doctor))).sort(),
     [shifts]
   );
 
-  // ---------- Same-Day Trades helpers (FUTURE ONLY) ----------
+  // ---------- SAME-DAY TRADES – FUTURE SHIFTS ONLY ----------
 
   const myFutureShifts = useMemo(() => {
     if (!selectedDoctor) return [];
     return shifts
-      .filter((s) => s.doctor === selectedDoctor)
-      .filter((s) => {
-        // Only keep shifts whose END is in the future
-        const { end } = getShiftDateTimes(s);
-        return end >= now;
-      })
+      .filter(
+        (s) =>
+          s.doctor === selectedDoctor &&
+          s.date >= todayStr // only future (or today) by date
+      )
       .sort((a, b) => {
         if (a.date === b.date) return a.startTime.localeCompare(b.startTime);
         return a.date.localeCompare(b.date);
@@ -201,7 +198,7 @@ export default function HomePage() {
         ...s,
         id: `${s.date}__${s.shiftName}__${s.startTime}__${s.endTime}__${s.doctor}`,
       }));
-  }, [shifts, selectedDoctor, now]);
+  }, [shifts, selectedDoctor, todayStr]);
 
   const selectedMyShift = useMemo(() => {
     if (!selectedShiftId) return null;
@@ -296,14 +293,14 @@ export default function HomePage() {
     setActiveTradeOffer(null);
   }, [selectedMyShift, shifts]);
 
-  // ---------- Get Together dates & warnings ----------
+  // ---------- GET TOGETHER – DATES & WARNINGS (REWORKED) ----------
 
   const getTogetherDates: GetTogetherDate[] = useMemo(() => {
     if (mode !== "getTogether") return [];
     const selected = selectedDoctorsForMeet;
     if (selected.length === 0) return [];
 
-    // Candidate dates = all dates that appear in the schedule
+    // Candidate dates = all dates in schedule (we will filter to future)
     const allDates = Array.from(new Set(shifts.map((s) => s.date))).sort();
 
     const result: GetTogetherDate[] = [];
@@ -312,6 +309,18 @@ export default function HomePage() {
       if (date < todayStr) continue; // only future dates
 
       const prevDate = previousDateStr(date);
+
+      const eveningStart = new Date(`${date}T17:00:00`);
+      const eveningEnd = new Date(`${date}T22:00:00`);
+
+      const dayStart = new Date(`${date}T10:00:00`);
+      const dayEnd = new Date(`${date}T14:00:00`);
+
+      const preStart = new Date(`${date}T22:00:00`);
+      const preEnd = new Date(`${date}T23:59:59`);
+
+      const prevPreStart = new Date(`${prevDate}T22:00:00`);
+      const prevPreEnd = new Date(`${prevDate}T23:59:59`);
 
       let allFree = true;
       const preNightsForDate: GetTogetherWarning[] = [];
@@ -326,65 +335,49 @@ export default function HomePage() {
         let hasPost = false;
 
         for (const s of docShifts) {
-          const startM = toMinutes(s.startTime);
-          const endM = toMinutes(s.endTime);
-          const isOvernight = endM <= startM; // e.g. 23:00–09:00
+          const { start, end } = getShiftDateTimes(s);
 
-          // Shifts that START on this date
-          if (s.date === date) {
-            // Evening free test: any work between 17:00–22:00 means NOT free
-            const eveStart = 17 * 60;
-            const eveEnd = 22 * 60;
-            let shiftStart = startM;
-            let shiftEnd = endM;
-            if (isOvernight) {
-              // treat as reaching past midnight
-              shiftEnd += 24 * 60;
-            }
+          // 1. Evening availability test – any overlap with 17:00–22:00 means NOT free
+          if (intervalsOverlap(start, end, eveningStart, eveningEnd)) {
+            allFree = false;
+            break;
+          }
 
-            if (shiftStart < eveEnd && shiftEnd > eveStart) {
-              allFree = false;
-              break;
-            }
-
-            // Coming off days: overlaps 10:00–14:00 on this date
-            if (!hasDay) {
-              const dayStart = 10 * 60;
-              const dayEnd = 14 * 60;
-              let dStart = startM;
-              let dEnd = endM;
-              if (isOvernight) dEnd += 24 * 60;
-              if (dStart < dayEnd && dEnd > dayStart) {
-                comingOffDaysForDate.push({
-                  doctor: doc,
-                  shiftName: s.shiftName,
-                  shiftDate: s.date,
-                });
-                hasDay = true;
-              }
-            }
-
-            // Pre-nights: shift on THIS date starting at or after 22:00
-            if (!hasPre && startM >= 22 * 60) {
-              preNightsForDate.push({
+          // 2. Coming off days (overlaps 10:00–14:00 on this date)
+          if (!hasDay) {
+            if (intervalsOverlap(start, end, dayStart, dayEnd)) {
+              comingOffDaysForDate.push({
                 doctor: doc,
                 shiftName: s.shiftName,
                 shiftDate: s.date,
               });
-              hasPre = true;
+              hasDay = true;
             }
           }
 
-          // Shifts that START on the previous date (for post-nights)
-          if (!hasPost && s.date === prevDate) {
-            if (startM >= 22 * 60) {
-              postNightsForDate.push({
-                doctor: doc,
-                shiftName: s.shiftName,
-                shiftDate: s.date,
-              });
-              hasPost = true;
-            }
+          // 3. Pre-nights – shift starting on THIS date at or after 22:00
+          if (!hasPre && s.date === date && start >= preStart && start <= preEnd) {
+            preNightsForDate.push({
+              doctor: doc,
+              shiftName: s.shiftName,
+              shiftDate: s.date,
+            });
+            hasPre = true;
+          }
+
+          // 4. Post-nights – shift starting on PREVIOUS date at or after 22:00
+          if (
+            !hasPost &&
+            s.date === prevDate &&
+            start >= prevPreStart &&
+            start <= prevPreEnd
+          ) {
+            postNightsForDate.push({
+              doctor: doc,
+              shiftName: s.shiftName,
+              shiftDate: s.date,
+            });
+            hasPost = true;
           }
         }
 
@@ -684,7 +677,7 @@ export default function HomePage() {
                               </td>
                               <td
                                 style={{
-                                  borderBottom: "1px solid #eee",
+                                  borderBottom: "1px solid "#eee",
                                   padding: "0.25rem",
                                   color: hasShort ? "#b91c1c" : "#166534",
                                   fontSize: "0.9rem",
@@ -989,22 +982,22 @@ export default function HomePage() {
                                     marginTop: "0.15rem",
                                   }}
                                 >
-                                  {postNights.map((w) => (
-                                    <div key={`post-${w.doctor}`}>
+                                  {postNights.map((w, idx) => (
+                                    <div key={`post-${w.doctor}-${idx}`}>
                                       ⚠ Warning: {w.doctor} is post-nights (
                                       {w.shiftName} on{" "}
                                       {formatDateLabel(w.shiftDate)})
                                     </div>
                                   ))}
-                                  {comingOffDays.map((w) => (
-                                    <div key={`day-${w.doctor}`}>
+                                  {comingOffDays.map((w, idx) => (
+                                    <div key={`day-${w.doctor}-${idx}`}>
                                       ⚠ Warning: {w.doctor} is coming off days (
                                       {w.shiftName} on{" "}
                                       {formatDateLabel(w.shiftDate)})
                                     </div>
                                   ))}
-                                  {preNights.map((w) => (
-                                    <div key={`pre-${w.doctor}`}>
+                                  {preNights.map((w, idx) => (
+                                    <div key={`pre-${w.doctor}-${idx}`}>
                                       ⚠ Warning: {w.doctor} is pre-nights (
                                       {w.shiftName} on{" "}
                                       {formatDateLabel(w.shiftDate)})
