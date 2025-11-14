@@ -33,14 +33,20 @@ type TradeCandidate = {
   shortTurnarounds: TradeShortTurnaround[];
 };
 
-type GetTogetherDate = {
-  date: string;
-  nights: { doctor: string; shiftName: string; startTime: string; endTime: string }[];
-  dayShifts: { doctor: string; shiftName: string; startTime: string; endTime: string }[];
-  postNights: { doctor: string; shiftName: string; startTime: string; endTime: string }[];
+type GetTogetherWarning = {
+  doctor: string;
+  shiftName: string;
+  shiftDate: string; // date of the shift that triggers the warning
 };
 
-// ---------- Helper functions (shared) ----------
+type GetTogetherDate = {
+  date: string; // the date of the potential get-together
+  preNights: GetTogetherWarning[];
+  comingOffDays: GetTogetherWarning[];
+  postNights: GetTogetherWarning[];
+};
+
+// ---------- Helper functions ----------
 
 function formatDateLabel(date: string): string {
   return new Date(date).toLocaleDateString("en-CA", {
@@ -55,7 +61,6 @@ function formatShiftLabel(shift: Shift): string {
   return `${formatDateLabel(shift.date)}, ${shift.shiftName} ${shift.startTime}–${shift.endTime}`;
 }
 
-// Convert date+time into a Date object in local time
 function makeDateTime(date: string, time: string): Date {
   return new Date(`${date}T${time}:00`);
 }
@@ -64,12 +69,9 @@ function makeDateTime(date: string, time: string): Date {
 function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
   const start = makeDateTime(shift.date, shift.startTime);
   let end = makeDateTime(shift.date, shift.endTime);
-
-  // If end is "before" start, treat as overnight (end next day)
   if (end <= start) {
     end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
   }
-
   return { start, end };
 }
 
@@ -86,6 +88,12 @@ function intervalOverlaps(
   return aStart < bEnd && aEnd > bStart;
 }
 
+// Night shift for THIS date = starts at or after 22:00 on that date
+function isNightShift(shift: Shift): boolean {
+  const [h, m] = shift.startTime.split(":").map(Number);
+  return h * 60 + m >= 22 * 60;
+}
+
 // Check if swapping into newShift would create < 12h between any two of doctor’s shifts
 function checkShortTurnaroundsForDoctor(
   allShifts: Shift[],
@@ -95,7 +103,6 @@ function checkShortTurnaroundsForDoctor(
 ): TradeShortTurnaround[] {
   const relevant = allShifts.filter((s) => s.doctor === doctor);
 
-  // Remove oldShift (the one they’re giving up) from their list
   const filtered = relevant.filter(
     (s) =>
       !(
@@ -106,7 +113,6 @@ function checkShortTurnaroundsForDoctor(
       )
   );
 
-  // Add the newShift (the one they would be working instead)
   const updated = [
     ...filtered,
     {
@@ -115,7 +121,6 @@ function checkShortTurnaroundsForDoctor(
     },
   ];
 
-  // Sort by start time
   const withTimes = updated.map((s) => ({
     shift: s,
     ...getShiftDateTimes(s),
@@ -123,11 +128,9 @@ function checkShortTurnaroundsForDoctor(
   withTimes.sort((a, b) => a.start.getTime() - b.start.getTime());
 
   const problems: TradeShortTurnaround[] = [];
-
   for (let i = 0; i < withTimes.length - 1; i++) {
     const current = withTimes[i];
     const next = withTimes[i + 1];
-
     const gapHours =
       (next.start.getTime() - current.end.getTime()) / (1000 * 60 * 60);
     if (gapHours < 12) {
@@ -141,16 +144,6 @@ function checkShortTurnaroundsForDoctor(
   }
 
   return problems;
-}
-
-// ---------- Get Together helpers ----------
-
-// Night shift = starts at or after 22:00 (for that date’s evening)
-function isNightShift(shift: Shift): boolean {
-  const [shStartH, shStartM] = shift.startTime.split(":").map(Number);
-  const startMinutes = shStartH * 60 + shStartM;
-  const nightCutoff = 22 * 60; // 22:00
-  return startMinutes >= nightCutoff;
 }
 
 // Minimal all-day ICS builder for a single date
@@ -174,7 +167,7 @@ function buildGetTogetherICS(date: string, doctors: string[]): string {
   ].join("\r\n");
 }
 
-// ---------- Main Page Component ----------
+// ---------- Component ----------
 
 export default function HomePage() {
   const [mode, setMode] = useState<Mode>("sameDayTrades");
@@ -183,15 +176,14 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Same-Day Trades state
-  const [selectedDoctor, setSelectedDoctor] = useState<string>("");
-  const [selectedShiftId, setSelectedShiftId] = useState<string>("");
+  // Same-Day Trades
+  const [selectedDoctor, setSelectedDoctor] = useState("");
+  const [selectedShiftId, setSelectedShiftId] = useState("");
   const [tradeCandidates, setTradeCandidates] = useState<TradeCandidate[]>([]);
-  const [activeTradeOffer, setActiveTradeOffer] = useState<TradeCandidate | null>(
-    null
-  );
+  const [activeTradeOffer, setActiveTradeOffer] =
+    useState<TradeCandidate | null>(null);
 
-  // Get Together state
+  // Get Together
   const [selectedDoctorsForMeet, setSelectedDoctorsForMeet] = useState<string[]>(
     []
   );
@@ -199,17 +191,13 @@ export default function HomePage() {
   // Contacts (optional)
   const [contacts, setContacts] = useState<Contact[]>([]);
 
-  // ---------- Load shifts from /api/schedule ----------
-
   useEffect(() => {
     (async () => {
       try {
         setLoading(true);
         setLoadError(null);
         const res = await fetch("/api/schedule");
-        if (!res.ok) {
-          throw new Error(`Failed to load schedule: ${res.status}`);
-        }
+        if (!res.ok) throw new Error(`Failed to load schedule: ${res.status}`);
         const data = await res.json();
         setShifts(data as Shift[]);
       } catch (err: any) {
@@ -221,13 +209,11 @@ export default function HomePage() {
     })();
   }, []);
 
-  // ---------- Load contacts from /api/contacts (if available) ----------
-
   useEffect(() => {
     (async () => {
       try {
         const res = await fetch("/api/contacts");
-        if (!res.ok) return; // if not set up, silently skip
+        if (!res.ok) return;
         const data = await res.json();
         setContacts(data as Contact[]);
       } catch (e) {
@@ -243,14 +229,11 @@ export default function HomePage() {
 
   const todayStr = new Date().toISOString().slice(0, 10);
 
-  // ---------- Derived data ----------
-
   const allDoctors = useMemo(
     () => Array.from(new Set(shifts.map((s) => s.doctor))).sort(),
     [shifts]
   );
 
-  // For Same-Day mode: doctor’s future shifts, each with a composite ID
   const myFutureShifts = useMemo(() => {
     if (!selectedDoctor) return [];
     return shifts
@@ -267,11 +250,10 @@ export default function HomePage() {
 
   const selectedMyShift = useMemo(() => {
     if (!selectedShiftId) return null;
-    const found = myFutureShifts.find((s) => s.id === selectedShiftId);
-    return found || null;
+    return myFutureShifts.find((s) => s.id === selectedShiftId) || null;
   }, [myFutureShifts, selectedShiftId]);
 
-  // ---------- Compute same-day trade candidates when my shift changes ----------
+  // ---------- Same-Day Trades candidates ----------
 
   useEffect(() => {
     if (!selectedMyShift) {
@@ -281,28 +263,23 @@ export default function HomePage() {
     }
     const myShift = selectedMyShift as Shift & { id: string };
 
-    // Other shifts on the same date (different doctors)
     const sameDayShifts = shifts.filter(
       (s) => s.date === myShift.date && s.doctor !== myShift.doctor
     );
 
     const candidates: TradeCandidate[] = sameDayShifts.map((otherShift) => {
-      // Check me: I give up myShift, I take otherShift
       const meProblems = checkShortTurnaroundsForDoctor(
         shifts,
         myShift.doctor,
         myShift,
         otherShift
       );
-
-      // Check them: they give up otherShift, they take myShift
       const themProblems = checkShortTurnaroundsForDoctor(
         shifts,
         otherShift.doctor,
         otherShift,
         myShift
       );
-
       return {
         otherShift,
         shortTurnarounds: [...meProblems, ...themProblems],
@@ -313,7 +290,7 @@ export default function HomePage() {
     setActiveTradeOffer(null);
   }, [selectedMyShift, shifts]);
 
-  // ---------- Get Together dates computation (with warnings) ----------
+  // ---------- Get Together dates & warnings ----------
 
   const getTogetherDates: GetTogetherDate[] = useMemo(() => {
     if (mode !== "getTogether") return [];
@@ -332,17 +309,17 @@ export default function HomePage() {
 
     for (const date of allDates) {
       if (date < todayStr) continue; // future only
-
       const dayShifts = byDate[date];
 
       let allFree = true;
-      const nightsForThisDate: GetTogetherDate["nights"] = [];
-      const dayShiftsForThisDate: GetTogetherDate["dayShifts"] = [];
-      const postNightsForThisDate: GetTogetherDate["postNights"] = [];
+      const preNightsForDate: GetTogetherWarning[] = [];
+      const comingOffDaysForDate: GetTogetherWarning[] = [];
+      const postNightsForDate: GetTogetherWarning[] = [];
 
-      // Time windows for warnings
-      const dayWindowStart = 10 * 60; // 10:00
-      const dayWindowEnd = 14 * 60; // 14:00
+      const eveStart = 17 * 60;
+      const eveEnd = 22 * 60;
+      const dayWindowStart = 10 * 60;
+      const dayWindowEnd = 14 * 60;
 
       const dayStartMidnight = new Date(`${date}T00:00:00`);
       const dayEndSix = new Date(`${date}T06:00:00`);
@@ -350,74 +327,67 @@ export default function HomePage() {
       for (const doc of selected) {
         const docShiftsToday = dayShifts.filter((s) => s.doctor === doc);
 
-        // Check today's shifts for evening blocks, nights, and "coming off a day shift"
+        // Check today's shifts for evening blocking + "pre-nights" and "coming off days"
         for (const s of docShiftsToday) {
           const [shStartH, shStartM] = s.startTime.split(":").map(Number);
           const [shEndH, shEndM] = s.endTime.split(":").map(Number);
           const startMinutes = shStartH * 60 + shStartM;
           const endMinutes = shEndH * 60 + shEndM;
           const overnight = endMinutes < startMinutes;
-          const eveStart = 17 * 60;
-          const eveEnd = 22 * 60;
 
           if (!overnight) {
-            // Evening block check: overlap with 17:00–22:00
+            // Block evening if overlaps [17:00,22:00)
             if (startMinutes < eveEnd && endMinutes > eveStart) {
               allFree = false;
               break;
             }
 
-            // Day-shift warning: overlap with 10:00–14:00
+            // Coming off a day shift: overlap with [10:00,14:00)
             if (
               startMinutes < dayWindowEnd &&
               endMinutes > dayWindowStart &&
-              !dayShiftsForThisDate.some((d) => d.doctor === doc)
+              !comingOffDaysForDate.some((w) => w.doctor === doc)
             ) {
-              dayShiftsForThisDate.push({
+              comingOffDaysForDate.push({
                 doctor: doc,
                 shiftName: s.shiftName,
-                startTime: s.startTime,
-                endTime: s.endTime,
+                shiftDate: s.date,
               });
             }
           } else {
-            // Overnight shift starting today:
-            // if it starts before 22:00, it blocks the evening
+            // Overnight starting this date: if it starts before 22:00, it blocks evening
             if (startMinutes < eveEnd) {
               allFree = false;
               break;
             }
           }
 
-          // Night shift warning for this date (working nights tonight)
-          if (
-            isNightShift(s) &&
-            !nightsForThisDate.some((n) => n.doctor === doc)
-          ) {
-            nightsForThisDate.push({
+          // Pre-nights: night shift starting ≥ 22:00 on this date
+          if (isNightShift(s) && !preNightsForDate.some((w) => w.doctor === doc)) {
+            preNightsForDate.push({
               doctor: doc,
               shiftName: s.shiftName,
-              startTime: s.startTime,
-              endTime: s.endTime,
+              shiftDate: s.date,
             });
           }
         }
 
         if (!allFree) break;
 
-        // Post-nights warning: any shift for this doctor overlapping this date's 00:00–06:00
+        // Post-nights: any shift for this doctor that overlaps 00:00–06:00 on THIS date
+        // and started on a different calendar date (typically previous day).
         const allDocShifts = shifts.filter((s) => s.doctor === doc);
         for (const s of allDocShifts) {
           const { start, end } = getShiftDateTimes(s);
           if (
+            s.date !== date &&
             intervalOverlaps(start, end, dayStartMidnight, dayEndSix) &&
-            !postNightsForThisDate.some((p) => p.doctor === doc)
+            !postNightsForDate.some((w) => w.doctor === doc)
           ) {
-            postNightsForThisDate.push({
+            postNightsForDate.push({
               doctor: doc,
               shiftName: s.shiftName,
-              startTime: s.startTime,
-              endTime: s.endTime,
+              shiftDate: s.date,
             });
             break;
           }
@@ -427,9 +397,9 @@ export default function HomePage() {
       if (allFree) {
         result.push({
           date,
-          nights: nightsForThisDate,
-          dayShifts: dayShiftsForThisDate,
-          postNights: postNightsForThisDate,
+          preNights: preNightsForDate,
+          comingOffDays: comingOffDaysForDate,
+          postNights: postNightsForDate,
         });
       }
     }
@@ -437,7 +407,7 @@ export default function HomePage() {
     return result;
   }, [mode, selectedDoctorsForMeet, shifts, todayStr]);
 
-  // ---------- Actions: Same-Day trade message ----------
+  // ---------- Same-Day Trade message ----------
 
   function buildSameDayTradeMessage(
     me: string,
@@ -459,7 +429,7 @@ export default function HomePage() {
     setActiveTradeOffer(candidate);
   }
 
-  // ---------- Actions: Get Together emails ----------
+  // ---------- Get Together email helpers ----------
 
   function handleEmailGetTogetherList() {
     if (getTogetherDates.length === 0 || selectedDoctorsForMeet.length === 0)
@@ -468,48 +438,37 @@ export default function HomePage() {
     const recipients = selectedDoctorsForMeet
       .map((doc) => contactMap.get(doc)?.email)
       .filter(Boolean) as string[];
-
     const to = recipients.join(",");
 
     const dateLines = getTogetherDates
-      .map(({ date, nights, dayShifts, postNights }) => {
+      .map(({ date, preNights, comingOffDays, postNights }) => {
         const label = formatDateLabel(date);
         const bits: string[] = [];
 
-        if (nights.length > 0) {
+        preNights.forEach((w) =>
           bits.push(
-            `Night shifts: ${nights
-              .map(
-                (n) =>
-                  `${n.doctor} ${n.shiftName} ${n.startTime}–${n.endTime}`
-              )
-              .join(", ")}`
-          );
-        }
-        if (dayShifts.length > 0) {
+            `${w.doctor} is pre-nights (${w.shiftName} on ${formatDateLabel(
+              w.shiftDate
+            )})`
+          )
+        );
+        comingOffDays.forEach((w) =>
           bits.push(
-            `Coming off day shift: ${dayShifts
-              .map(
-                (d) =>
-                  `${d.doctor} ${d.shiftName} ${d.startTime}–${d.endTime}`
-              )
-              .join(", ")}`
-          );
-        }
-        if (postNights.length > 0) {
+            `${w.doctor} is coming off days (${w.shiftName} on ${formatDateLabel(
+              w.shiftDate
+            )})`
+          )
+        );
+        postNights.forEach((w) =>
           bits.push(
-            `Post nights: ${postNights
-              .map(
-                (p) =>
-                  `${p.doctor} ${p.shiftName} ${p.startTime}–${p.endTime}`
-              )
-              .join(", ")}`
-          );
-        }
+            `${w.doctor} is post-nights (${w.shiftName} on ${formatDateLabel(
+              w.shiftDate
+            )})`
+          )
+        );
 
         const warningsText =
-          bits.length > 0 ? ` (${bits.join(" | ")})` : "";
-
+          bits.length > 0 ? ` (Warnings: ${bits.join("; ")})` : "";
         return `- ${label}${warningsText}`;
       })
       .join("\n");
@@ -517,7 +476,6 @@ export default function HomePage() {
     const subject = encodeURIComponent(
       `Get Together – Free evenings for ${selectedDoctorsForMeet.join(", ")}`
     );
-
     const body = encodeURIComponent(
       `Hi everyone,\n\nHere are potential evenings when everyone is free after 17:00:\n\n${dateLines}\n\nGenerated by Metri-Manager – mode: Get Together.`
     );
@@ -762,7 +720,7 @@ export default function HomePage() {
                     </table>
                   )}
 
-                  {/* Detail of short turnarounds for selected candidate */}
+                  {/* Active trade offer */}
                   {activeTradeOffer && (
                     <div
                       style={{
@@ -811,7 +769,6 @@ export default function HomePage() {
                         }}
                       />
 
-                      {/* Email link if we have their email */}
                       {(() => {
                         if (!selectedMyShift) return null;
                         const meName = selectedMyShift.doctor;
@@ -869,12 +826,13 @@ export default function HomePage() {
               <h2>Get Together – Free Evenings After 17:00</h2>
               <p>
                 Select doctors below. I’ll show future dates where all of them
-                are free after 17:00. If someone is on a night shift (start ≥
-                22:00), is coming off a day shift (worked 10:00–14:00), or is
-                post nights (worked 00:00–06:00), I’ll flag it with a warning.
+                are free after 17:00. If someone is pre-nights (starts ≥ 22:00),
+                coming off days (worked 10:00–14:00), or post-nights (worked
+                00:00–06:00 from a previous-night shift), I’ll flag it with a
+                warning.
               </p>
 
-              {/* Multi-select doctors */}
+              {/* Doctor multi-select */}
               <div
                 style={{
                   display: "flex",
@@ -958,7 +916,7 @@ export default function HomePage() {
                       <h3>Potential Get-Together Evenings</h3>
                       <ul style={{ listStyle: "none", paddingLeft: 0 }}>
                         {getTogetherDates.map(
-                          ({ date, nights, dayShifts, postNights }) => {
+                          ({ date, preNights, comingOffDays, postNights }) => {
                             const label = formatDateLabel(date);
                             const ics = buildGetTogetherICS(
                               date,
@@ -972,49 +930,41 @@ export default function HomePage() {
                               const recipients = selectedDoctorsForMeet
                                 .map((doc) => contactMap.get(doc)?.email)
                                 .filter(Boolean) as string[];
-
                               const to = recipients.join(",");
 
-                              const bits: string[] = [];
-                              if (nights.length > 0) {
-                                bits.push(
-                                  `Night shifts: ${nights
-                                    .map(
-                                      (n) =>
-                                        `${n.doctor} ${n.shiftName} ${n.startTime}–${n.endTime}`
-                                    )
-                                    .join(", ")}`
-                                );
-                              }
-                              if (dayShifts.length > 0) {
-                                bits.push(
-                                  `Coming off day shift: ${dayShifts
-                                    .map(
-                                      (d) =>
-                                        `${d.doctor} ${d.shiftName} ${d.startTime}–${d.endTime}`
-                                    )
-                                    .join(", ")}`
-                                );
-                              }
-                              if (postNights.length > 0) {
-                                bits.push(
-                                  `Post nights: ${postNights
-                                    .map(
-                                      (p) =>
-                                        `${p.doctor} ${p.shiftName} ${p.startTime}–${p.endTime}`
-                                    )
-                                    .join(", ")}`
-                                );
-                              }
+                              const warningLines: string[] = [];
+                              preNights.forEach((w) =>
+                                warningLines.push(
+                                  `${w.doctor} is pre-nights (${w.shiftName} on ${formatDateLabel(
+                                    w.shiftDate
+                                  )})`
+                                )
+                              );
+                              comingOffDays.forEach((w) =>
+                                warningLines.push(
+                                  `${w.doctor} is coming off days (${w.shiftName} on ${formatDateLabel(
+                                    w.shiftDate
+                                  )})`
+                                )
+                              );
+                              postNights.forEach((w) =>
+                                warningLines.push(
+                                  `${w.doctor} is post-nights (${w.shiftName} on ${formatDateLabel(
+                                    w.shiftDate
+                                  )})`
+                                )
+                              );
+
                               const warningsText =
-                                bits.length > 0
-                                  ? bits.join(" ") + "\n\n"
+                                warningLines.length > 0
+                                  ? `Warnings:\n${warningLines
+                                      .map((l) => `- ${l}`)
+                                      .join("\n")}\n\n`
                                   : "";
 
                               const subject = encodeURIComponent(
                                 `Get Together – ${label}`
                               );
-
                               const body = encodeURIComponent(
                                 `Hi everyone,\n\nHow about a get-together on ${label}?\n\n${warningsText}(You can add the attached .ics event to your calendar.)\n\nGenerated by Metri-Manager – mode: Get Together.`
                               );
@@ -1035,64 +985,36 @@ export default function HomePage() {
                               >
                                 <div>{label}</div>
 
-                                {/* Night shifts warning */}
-                                {nights.length > 0 && (
-                                  <div
-                                    style={{
-                                      fontSize: "0.8rem",
-                                      color: "#b45309",
-                                      marginTop: "0.15rem",
-                                    }}
-                                  >
-                                    ⚠ Working nights on this date:&nbsp;
-                                    {nights
-                                      .map(
-                                        (n) =>
-                                          `${n.doctor} (${n.shiftName} ${n.startTime}–${n.endTime})`
-                                      )
-                                      .join("; ")}
-                                  </div>
-                                )}
-
-                                {/* Coming off day shift */}
-                                {dayShifts.length > 0 && (
-                                  <div
-                                    style={{
-                                      fontSize: "0.8rem",
-                                      color: "#b45309",
-                                      marginTop: "0.15rem",
-                                    }}
-                                  >
-                                    ⚠ Coming off a day shift (worked between
-                                    10:00 and 14:00):&nbsp;
-                                    {dayShifts
-                                      .map(
-                                        (d) =>
-                                          `${d.doctor} (${d.shiftName} ${d.startTime}–${d.endTime})`
-                                      )
-                                      .join("; ")}
-                                  </div>
-                                )}
-
-                                {/* Post nights */}
-                                {postNights.length > 0 && (
-                                  <div
-                                    style={{
-                                      fontSize: "0.8rem",
-                                      color: "#b45309",
-                                      marginTop: "0.15rem",
-                                    }}
-                                  >
-                                    ⚠ Post nights (worked between 00:00 and
-                                    06:00):&nbsp;
-                                    {postNights
-                                      .map(
-                                        (p) =>
-                                          `${p.doctor} (${p.shiftName} ${p.startTime}–${p.endTime})`
-                                      )
-                                      .join("; ")}
-                                  </div>
-                                )}
+                                {/* Warnings list */}
+                                <div
+                                  style={{
+                                    fontSize: "0.8rem",
+                                    color: "#b45309",
+                                    marginTop: "0.15rem",
+                                  }}
+                                >
+                                  {postNights.map((w) => (
+                                    <div key={`post-${w.doctor}`}>
+                                      ⚠ Warning: {w.doctor} is post-nights (
+                                      {w.shiftName} on{" "}
+                                      {formatDateLabel(w.shiftDate)})
+                                    </div>
+                                  ))}
+                                  {comingOffDays.map((w) => (
+                                    <div key={`day-${w.doctor}`}>
+                                      ⚠ Warning: {w.doctor} is coming off days (
+                                      {w.shiftName} on{" "}
+                                      {formatDateLabel(w.shiftDate)})
+                                    </div>
+                                  ))}
+                                  {preNights.map((w) => (
+                                    <div key={`pre-${w.doctor}`}>
+                                      ⚠ Warning: {w.doctor} is pre-nights (
+                                      {w.shiftName} on{" "}
+                                      {formatDateLabel(w.shiftDate)})
+                                    </div>
+                                  ))}
+                                </div>
 
                                 <div
                                   style={{
