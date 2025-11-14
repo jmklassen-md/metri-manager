@@ -36,11 +36,11 @@ type TradeCandidate = {
 type GetTogetherWarning = {
   doctor: string;
   shiftName: string;
-  shiftDate: string; // date of the shift that triggers the warning
+  shiftDate: string; // when that shift actually starts
 };
 
 type GetTogetherDate = {
-  date: string; // the date of the potential get-together
+  date: string; // the date we’re considering for the evening meetup
   preNights: GetTogetherWarning[];
   comingOffDays: GetTogetherWarning[];
   postNights: GetTogetherWarning[];
@@ -70,7 +70,7 @@ function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
   const start = makeDateTime(shift.date, shift.startTime);
   let end = makeDateTime(shift.date, shift.endTime);
   if (end <= start) {
-    end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
+    end = new Date(end.getTime() + 24 * 60 * 60 * 1000); // +1 day
   }
   return { start, end };
 }
@@ -88,65 +88,6 @@ function intervalOverlaps(
   return aStart < bEnd && aEnd > bStart;
 }
 
-// Night shift for THIS date = starts at or after 22:00 on that date
-function isNightShift(shift: Shift): boolean {
-  const [h, m] = shift.startTime.split(":").map(Number);
-  return h * 60 + m >= 22 * 60;
-}
-
-// Check if swapping into newShift would create < 12h between any two of doctor’s shifts
-function checkShortTurnaroundsForDoctor(
-  allShifts: Shift[],
-  doctor: string,
-  oldShift: Shift,
-  newShift: Shift
-): TradeShortTurnaround[] {
-  const relevant = allShifts.filter((s) => s.doctor === doctor);
-
-  const filtered = relevant.filter(
-    (s) =>
-      !(
-        s.date === oldShift.date &&
-        s.shiftName === oldShift.shiftName &&
-        s.startTime === oldShift.startTime &&
-        s.endTime === oldShift.endTime
-      )
-  );
-
-  const updated = [
-    ...filtered,
-    {
-      ...newShift,
-      doctor,
-    },
-  ];
-
-  const withTimes = updated.map((s) => ({
-    shift: s,
-    ...getShiftDateTimes(s),
-  }));
-  withTimes.sort((a, b) => a.start.getTime() - b.start.getTime());
-
-  const problems: TradeShortTurnaround[] = [];
-  for (let i = 0; i < withTimes.length - 1; i++) {
-    const current = withTimes[i];
-    const next = withTimes[i + 1];
-    const gapHours =
-      (next.start.getTime() - current.end.getTime()) / (1000 * 60 * 60);
-    if (gapHours < 12) {
-      problems.push({
-        doctor,
-        existingShift: current.shift,
-        newShift: next.shift,
-        gapHours,
-      });
-    }
-  }
-
-  return problems;
-}
-
-// Minimal all-day ICS builder for a single date
 function buildGetTogetherICS(date: string, doctors: string[]): string {
   const y = date.slice(0, 4);
   const m = date.slice(5, 7);
@@ -234,6 +175,8 @@ export default function HomePage() {
     [shifts]
   );
 
+  // ---------- Same-Day Trades helpers ----------
+
   const myFutureShifts = useMemo(() => {
     if (!selectedDoctor) return [];
     return shifts
@@ -253,7 +196,56 @@ export default function HomePage() {
     return myFutureShifts.find((s) => s.id === selectedShiftId) || null;
   }, [myFutureShifts, selectedShiftId]);
 
-  // ---------- Same-Day Trades candidates ----------
+  function checkShortTurnaroundsForDoctor(
+    all: Shift[],
+    doctor: string,
+    oldShift: Shift,
+    newShift: Shift
+  ): TradeShortTurnaround[] {
+    const relevant = all.filter((s) => s.doctor === doctor);
+
+    const filtered = relevant.filter(
+      (s) =>
+        !(
+          s.date === oldShift.date &&
+          s.shiftName === oldShift.shiftName &&
+          s.startTime === oldShift.startTime &&
+          s.endTime === oldShift.endTime
+        )
+    );
+
+    const updated = [
+      ...filtered,
+      {
+        ...newShift,
+        doctor,
+      },
+    ];
+
+    const withTimes = updated.map((s) => ({
+      shift: s,
+      ...getShiftDateTimes(s),
+    }));
+    withTimes.sort((a, b) => a.start.getTime() - b.start.getTime());
+
+    const problems: TradeShortTurnaround[] = [];
+    for (let i = 0; i < withTimes.length - 1; i++) {
+      const current = withTimes[i];
+      const next = withTimes[i + 1];
+      const gapHours =
+        (next.start.getTime() - current.end.getTime()) / (1000 * 60 * 60);
+      if (gapHours < 12) {
+        problems.push({
+          doctor,
+          existingShift: current.shift,
+          newShift: next.shift,
+          gapHours,
+        });
+      }
+    }
+
+    return problems;
+  }
 
   useEffect(() => {
     if (!selectedMyShift) {
@@ -290,108 +282,96 @@ export default function HomePage() {
     setActiveTradeOffer(null);
   }, [selectedMyShift, shifts]);
 
-  // ---------- Get Together dates & warnings ----------
+  // ---------- Get Together date & warning logic (NEW) ----------
 
   const getTogetherDates: GetTogetherDate[] = useMemo(() => {
     if (mode !== "getTogether") return [];
     const selected = selectedDoctorsForMeet;
     if (selected.length === 0) return [];
 
-    // Group shifts by date
-    const byDate: Record<string, Shift[]> = {};
-    for (const s of shifts) {
-      if (!byDate[s.date]) byDate[s.date] = [];
-      byDate[s.date].push(s);
-    }
+    // Candidate dates = all dates that appear in the schedule (start dates)
+    const allDates = Array.from(new Set(shifts.map((s) => s.date))).sort();
 
-    const allDates = Object.keys(byDate).sort();
     const result: GetTogetherDate[] = [];
 
     for (const date of allDates) {
-      if (date < todayStr) continue; // future only
-      const dayShifts = byDate[date];
+      if (date < todayStr) continue;
+
+      const dayStart = new Date(`${date}T00:00:00`);
+      const nightWindowStart = new Date(dayStart.getTime()); // 00:00
+      const nightWindowEnd = new Date(dayStart.getTime() + 6 * 60 * 60 * 1000); // 06:00
+
+      const dayWindowStart = new Date(dayStart.getTime() + 10 * 60 * 60 * 1000); // 10:00
+      const dayWindowEnd = new Date(dayStart.getTime() + 14 * 60 * 60 * 1000); // 14:00
+
+      const eveWindowStart = new Date(dayStart.getTime() + 17 * 60 * 60 * 1000); // 17:00
+      const eveWindowEnd = new Date(dayStart.getTime() + 22 * 60 * 60 * 1000); // 22:00
+
+      const preNightWindowStart = eveWindowEnd; // 22:00
+      const preNightWindowEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000); // 24:00 (next midnight)
 
       let allFree = true;
       const preNightsForDate: GetTogetherWarning[] = [];
       const comingOffDaysForDate: GetTogetherWarning[] = [];
       const postNightsForDate: GetTogetherWarning[] = [];
 
-      const eveStart = 17 * 60;
-      const eveEnd = 22 * 60;
-      const dayWindowStart = 10 * 60;
-      const dayWindowEnd = 14 * 60;
-
-      const dayStartMidnight = new Date(`${date}T00:00:00`);
-      const dayEndSix = new Date(`${date}T06:00:00`);
-
       for (const doc of selected) {
-        const docShiftsToday = dayShifts.filter((s) => s.doctor === doc);
+        const docShifts = shifts.filter((s) => s.doctor === doc);
 
-        // Check today's shifts for evening blocking + "pre-nights" and "coming off days"
-        for (const s of docShiftsToday) {
-          const [shStartH, shStartM] = s.startTime.split(":").map(Number);
-          const [shEndH, shEndM] = s.endTime.split(":").map(Number);
-          const startMinutes = shStartH * 60 + shStartM;
-          const endMinutes = shEndH * 60 + shEndM;
-          const overnight = endMinutes < startMinutes;
+        let docHasPre = false;
+        let docHasPost = false;
+        let docHasDay = false;
 
-          if (!overnight) {
-            // Block evening if overlaps [17:00,22:00)
-            if (startMinutes < eveEnd && endMinutes > eveStart) {
-              allFree = false;
-              break;
-            }
+        for (const s of docShifts) {
+          const { start, end } = getShiftDateTimes(s);
 
-            // Coming off a day shift: overlap with [10:00,14:00)
-            if (
-              startMinutes < dayWindowEnd &&
-              endMinutes > dayWindowStart &&
-              !comingOffDaysForDate.some((w) => w.doctor === doc)
-            ) {
-              comingOffDaysForDate.push({
-                doctor: doc,
-                shiftName: s.shiftName,
-                shiftDate: s.date,
-              });
-            }
-          } else {
-            // Overnight starting this date: if it starts before 22:00, it blocks evening
-            if (startMinutes < eveEnd) {
-              allFree = false;
-              break;
-            }
+          // 1) If any shift overlaps 17:00–22:00 => they are NOT free that evening
+          if (intervalOverlaps(start, end, eveWindowStart, eveWindowEnd)) {
+            allFree = false;
+            break;
           }
 
-          // Pre-nights: night shift starting ≥ 22:00 on this date
-          if (isNightShift(s) && !preNightsForDate.some((w) => w.doctor === doc)) {
+          // 2) Pre-nights (22:00–24:00 on this date)
+          if (
+            !docHasPre &&
+            intervalOverlaps(start, end, preNightWindowStart, preNightWindowEnd)
+          ) {
             preNightsForDate.push({
               doctor: doc,
               shiftName: s.shiftName,
               shiftDate: s.date,
             });
+            docHasPre = true;
           }
-        }
 
-        if (!allFree) break;
-
-        // Post-nights: any shift for this doctor that overlaps 00:00–06:00 on THIS date
-        // and started on a different calendar date (typically previous day).
-        const allDocShifts = shifts.filter((s) => s.doctor === doc);
-        for (const s of allDocShifts) {
-          const { start, end } = getShiftDateTimes(s);
+          // 3) Coming off days (10:00–14:00 on this date)
           if (
-            s.date !== date &&
-            intervalOverlaps(start, end, dayStartMidnight, dayEndSix) &&
-            !postNightsForDate.some((w) => w.doctor === doc)
+            !docHasDay &&
+            intervalOverlaps(start, end, dayWindowStart, dayWindowEnd)
+          ) {
+            comingOffDaysForDate.push({
+              doctor: doc,
+              shiftName: s.shiftName,
+              shiftDate: s.date,
+            });
+            docHasDay = true;
+          }
+
+          // 4) Post-nights (00:00–06:00 on this date)
+          if (
+            !docHasPost &&
+            intervalOverlaps(start, end, nightWindowStart, nightWindowEnd)
           ) {
             postNightsForDate.push({
               doctor: doc,
               shiftName: s.shiftName,
               shiftDate: s.date,
             });
-            break;
+            docHasPost = true;
           }
         }
+
+        if (!allFree) break;
       }
 
       if (allFree) {
@@ -737,8 +717,8 @@ export default function HomePage() {
                           <ul>
                             {activeTradeOffer.shortTurnarounds.map((st, i) => (
                               <li key={i}>
-                                {st.doctor}: {formatShiftLabel(st.existingShift)} →{" "}
-                                {formatShiftLabel(st.newShift)} (gap ≈{" "}
+                                {st.doctor}: {formatShiftLabel(st.existingShift)}{" "}
+                                → {formatShiftLabel(st.newShift)} (gap ≈{" "}
                                 {st.gapHours.toFixed(1)} h)
                               </li>
                             ))}
@@ -826,10 +806,9 @@ export default function HomePage() {
               <h2>Get Together – Free Evenings After 17:00</h2>
               <p>
                 Select doctors below. I’ll show future dates where all of them
-                are free after 17:00. If someone is pre-nights (starts ≥ 22:00),
-                coming off days (worked 10:00–14:00), or post-nights (worked
-                00:00–06:00 from a previous-night shift), I’ll flag it with a
-                warning.
+                are free after 17:00. If someone is pre-nights (22:00–24:00),
+                coming off days (10:00–14:00), or post-nights (00:00–06:00), I’ll
+                flag it with a warning.
               </p>
 
               {/* Doctor multi-select */}
@@ -985,7 +964,7 @@ export default function HomePage() {
                               >
                                 <div>{label}</div>
 
-                                {/* Warnings list */}
+                                {/* Warnings */}
                                 <div
                                   style={{
                                     fontSize: "0.8rem",
