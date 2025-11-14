@@ -36,11 +36,11 @@ type TradeCandidate = {
 type GetTogetherWarning = {
   doctor: string;
   shiftName: string;
-  shiftDate: string; // shift start date
+  shiftDate: string;
 };
 
 type GetTogetherDate = {
-  date: string; // considered get-together date
+  date: string;
   preNights: GetTogetherWarning[];
   comingOffDays: GetTogetherWarning[];
   postNights: GetTogetherWarning[];
@@ -65,7 +65,6 @@ function makeDateTime(date: string, time: string): Date {
   return new Date(`${date}T${time}:00`);
 }
 
-// For overnight shifts adjust end datetime
 function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
   const start = makeDateTime(shift.date, shift.startTime);
   let end = makeDateTime(shift.date, shift.endTime);
@@ -79,8 +78,12 @@ function hoursBetween(a: Date, b: Date): number {
   return Math.abs(b.getTime() - a.getTime()) / (1000 * 60 * 60);
 }
 
-// Interval overlap check
-function intervalsOverlap(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date) {
+function intervalsOverlap(
+  aStart: Date,
+  aEnd: Date,
+  bStart: Date,
+  bEnd: Date
+): boolean {
   return aStart < bEnd && aEnd > bStart;
 }
 
@@ -90,7 +93,6 @@ function previousDateStr(date: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-// ICS builder for Get Together
 function buildGetTogetherICS(date: string, doctors: string[]): string {
   const y = date.slice(0, 4);
   const m = date.slice(5, 7);
@@ -102,7 +104,10 @@ function buildGetTogetherICS(date: string, doctors: string[]): string {
     "PRODID:-//Metri-Manager//GetTogether//EN",
     "BEGIN:VEVENT",
     `UID:get-together-${date}@metri-manager`,
-    `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, "").split(".")[0]}Z`,
+    `DTSTAMP:${new Date()
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .split(".")[0]}Z`,
     `DTSTART;VALUE=DATE:${y}${m}${d}`,
     `SUMMARY:Get together (${doctors.join(", ")})`,
     `DESCRIPTION:Get together for ${doctors.join(", ")}`,
@@ -120,19 +125,16 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Same-Day Trades
   const [selectedDoctor, setSelectedDoctor] = useState("");
   const [selectedShiftId, setSelectedShiftId] = useState("");
   const [tradeCandidates, setTradeCandidates] = useState<TradeCandidate[]>([]);
   const [activeTradeOffer, setActiveTradeOffer] =
     useState<TradeCandidate | null>(null);
 
-  // Get Together
   const [selectedDoctorsForMeet, setSelectedDoctorsForMeet] = useState<string[]>(
     []
   );
 
-  // Contacts (optional, via DB)
   const [contacts, setContacts] = useState<Contact[]>([]);
 
   // Load schedule
@@ -188,7 +190,7 @@ export default function HomePage() {
       .filter(
         (s) =>
           s.doctor === selectedDoctor &&
-          s.date >= todayStr // only future (or today) by date
+          s.date >= todayStr // future or today
       )
       .sort((a, b) => {
         if (a.date === b.date) return a.startTime.localeCompare(b.startTime);
@@ -213,7 +215,6 @@ export default function HomePage() {
   ): TradeShortTurnaround[] {
     const relevant = all.filter((s) => s.doctor === doctor);
 
-    // Remove the shift being traded away, add the shift being traded into
     const filtered = relevant.filter(
       (s) =>
         !(
@@ -257,7 +258,6 @@ export default function HomePage() {
     return problems;
   }
 
-  // Build candidates any time my selected shift changes
   useEffect(() => {
     if (!selectedMyShift) {
       setTradeCandidates([]);
@@ -293,20 +293,18 @@ export default function HomePage() {
     setActiveTradeOffer(null);
   }, [selectedMyShift, shifts]);
 
-  // ---------- GET TOGETHER – DATES & WARNINGS (REWORKED) ----------
+  // ---------- GET TOGETHER – DATES & WARNINGS ----------
 
   const getTogetherDates: GetTogetherDate[] = useMemo(() => {
     if (mode !== "getTogether") return [];
     const selected = selectedDoctorsForMeet;
     if (selected.length === 0) return [];
 
-    // Candidate dates = all dates in schedule (we will filter to future)
     const allDates = Array.from(new Set(shifts.map((s) => s.date))).sort();
-
     const result: GetTogetherDate[] = [];
 
     for (const date of allDates) {
-      if (date < todayStr) continue; // only future dates
+      if (date < todayStr) continue; // future only
 
       const prevDate = previousDateStr(date);
 
@@ -337,13 +335,13 @@ export default function HomePage() {
         for (const s of docShifts) {
           const { start, end } = getShiftDateTimes(s);
 
-          // 1. Evening availability test – any overlap with 17:00–22:00 means NOT free
+          // free after 17:00?
           if (intervalsOverlap(start, end, eveningStart, eveningEnd)) {
             allFree = false;
             break;
           }
 
-          // 2. Coming off days (overlaps 10:00–14:00 on this date)
+          // coming off days
           if (!hasDay) {
             if (intervalsOverlap(start, end, dayStart, dayEnd)) {
               comingOffDaysForDate.push({
@@ -355,7 +353,7 @@ export default function HomePage() {
             }
           }
 
-          // 3. Pre-nights – shift starting on THIS date at or after 22:00
+          // pre-nights on this date
           if (!hasPre && s.date === date && start >= preStart && start <= preEnd) {
             preNightsForDate.push({
               doctor: doc,
@@ -365,7 +363,7 @@ export default function HomePage() {
             hasPre = true;
           }
 
-          // 4. Post-nights – shift starting on PREVIOUS date at or after 22:00
+          // post-nights: previous date starting ≥ 22:00
           if (
             !hasPost &&
             s.date === prevDate &&
@@ -422,8 +420,9 @@ export default function HomePage() {
   // ---------- Get Together email helpers ----------
 
   function handleEmailGetTogetherList() {
-    if (getTogetherDates.length === 0 || selectedDoctorsForMeet.length === 0)
+    if (getTogetherDates.length === 0 || selectedDoctorsForMeet.length === 0) {
       return;
+    }
 
     const recipients = selectedDoctorsForMeet
       .map((doc) => contactMap.get(doc)?.email)
@@ -522,7 +521,7 @@ export default function HomePage() {
 
       {!loading && !loadError && (
         <>
-          {/* SAME-DAY TRADES MODE */}
+          {/* SAME-DAY TRADES */}
           {mode === "sameDayTrades" && (
             <section
               style={{
@@ -677,7 +676,7 @@ export default function HomePage() {
                               </td>
                               <td
                                 style={{
-                                  borderBottom: "1px solid "#eee",
+                                  borderBottom: "1px solid #eee",
                                   padding: "0.25rem",
                                   color: hasShort ? "#b91c1c" : "#166534",
                                   fontSize: "0.9rem",
@@ -803,7 +802,7 @@ export default function HomePage() {
             </section>
           )}
 
-          {/* GET TOGETHER MODE */}
+          {/* GET TOGETHER */}
           {mode === "getTogether" && (
             <section
               style={{
@@ -974,7 +973,6 @@ export default function HomePage() {
                               >
                                 <div>{label}</div>
 
-                                {/* Warnings */}
                                 <div
                                   style={{
                                     fontSize: "0.8rem",
