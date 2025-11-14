@@ -1,54 +1,32 @@
-import { NextRequest, NextResponse } from "next/server";
-import {
-  getAllContacts,
-  getContact,
-  upsertContact,
-} from "../../../lib/db";
+import { NextResponse } from "next/server";
+import { pool } from "@/app/lib/db";
 
-export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const doctor = searchParams.get("doctor");
-
+export async function GET() {
   try {
-    if (doctor) {
-      const contact = await getContact(doctor);
-      return NextResponse.json(contact || null);
-    } else {
-      const contacts = await getAllContacts();
-      return NextResponse.json(contacts);
-    }
+    const { rows } = await pool.query("SELECT * FROM contacts ORDER BY doctor_name ASC");
+    return NextResponse.json(rows);
   } catch (err) {
-    console.error("GET /api/contacts error:", err);
-    return NextResponse.json(
-      { error: "Failed to fetch contacts" },
-      { status: 500 }
-    );
+    console.error("GET contacts error:", err);
+    return NextResponse.json({ error: "Failed to fetch contacts" }, { status: 500 });
   }
 }
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const doctorName = (body.doctorName || "").trim();
-    const email = (body.email || "").trim();
-    const phone = (body.phone || "").trim();
-    const preferred = (body.preferred || "none").trim();
+    const data = await req.json();
+    const { doctor_name, email, phone, preferred } = data;
 
-    if (!doctorName) {
-      return NextResponse.json(
-        { error: "doctorName is required" },
-        { status: 400 }
-      );
-    }
-
-    await upsertContact({ doctorName, email, phone, preferred });
-
-    return NextResponse.json({ ok: true });
-  } catch (err) {
-    console.error("POST /api/contacts error:", err);
-    return NextResponse.json(
-      { error: "Failed to save contact" },
-      { status: 500 }
+    await pool.query(
+      `INSERT INTO contacts (doctor_name, email, phone, preferred)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (doctor_name)
+       DO UPDATE SET email=$2, phone=$3, preferred=$4`,
+      [doctor_name, email, phone, preferred]
     );
+
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("POST contacts error:", err);
+    return NextResponse.json({ error: "Failed to save contact" }, { status: 500 });
   }
 }
