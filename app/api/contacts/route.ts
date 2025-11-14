@@ -1,32 +1,60 @@
-import { NextResponse } from "next/server";
-import { pool } from "@/lib/db";
+import { NextRequest, NextResponse } from "next/server";
+import {
+  getAllContacts,
+  getContact,
+  upsertContact,
+} from "@/lib/db";
 
-export async function GET() {
+// GET /api/contacts
+// Optional: ?doctor=Klassen  -> returns single contact
+// Otherwise returns all contacts
+export async function GET(req: NextRequest) {
   try {
-    const { rows } = await pool.query("SELECT * FROM contacts ORDER BY doctor_name ASC");
-    return NextResponse.json(rows);
+    const { searchParams } = new URL(req.url);
+    const doctor = searchParams.get("doctor");
+
+    if (doctor) {
+      const contact = await getContact(doctor);
+      return NextResponse.json(contact || null);
+    } else {
+      const contacts = await getAllContacts();
+      return NextResponse.json(contacts);
+    }
   } catch (err) {
-    console.error("GET contacts error:", err);
-    return NextResponse.json({ error: "Failed to fetch contacts" }, { status: 500 });
+    console.error("GET /api/contacts error:", err);
+    return NextResponse.json(
+      { error: "Failed to fetch contacts" },
+      { status: 500 }
+    );
   }
 }
 
-export async function POST(req: Request) {
+// POST /api/contacts
+// Body: { doctorName, email, phone, preferred }
+export async function POST(req: NextRequest) {
   try {
-    const data = await req.json();
-    const { doctor_name, email, phone, preferred } = data;
+    const { doctorName, email, phone, preferred } = await req.json();
 
-    await pool.query(
-      `INSERT INTO contacts (doctor_name, email, phone, preferred)
-       VALUES ($1,$2,$3,$4)
-       ON CONFLICT (doctor_name)
-       DO UPDATE SET email=$2, phone=$3, preferred=$4`,
-      [doctor_name, email, phone, preferred]
-    );
+    if (!doctorName) {
+      return NextResponse.json(
+        { error: "doctorName is required" },
+        { status: 400 }
+      );
+    }
+
+    await upsertContact({
+      doctorName,
+      email: email || "",
+      phone: phone || "",
+      preferred: preferred || "none",
+    });
 
     return NextResponse.json({ success: true });
   } catch (err) {
-    console.error("POST contacts error:", err);
-    return NextResponse.json({ error: "Failed to save contact" }, { status: 500 });
+    console.error("POST /api/contacts error:", err);
+    return NextResponse.json(
+      { error: "Failed to save contact" },
+      { status: 500 }
+    );
   }
 }
