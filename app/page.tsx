@@ -771,7 +771,88 @@ ${contactLine}
   }
 
   // ---------- Render ----------
+  // --- ACCESS GATE: if they haven't unlocked, show the code screen ---
+  if (!hasAccess) {
+    return (
+      <main
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#101827",
+          color: "#f9fafb",
+          padding: "1rem",
+        }}
+      >
+        <div
+          style={{
+            maxWidth: 400,
+            width: "100%",
+            padding: "1.5rem",
+            borderRadius: 12,
+            background: "#111827",
+            boxShadow: "0 10px 25px rgba(0,0,0,0.4)",
+            border: "1px solid #374151",
+          }}
+        >
+          <h1 style={{ marginBottom: "0.5rem" }}>Metri-Manager</h1>
+          <p style={{ fontSize: "0.9rem", color: "#9ca3af", marginBottom: "1rem" }}>
+            Please enter the SBH access code to continue.
+          </p>
 
+          <form onSubmit={handleAccessSubmit}>
+            <input
+              type="password"
+              value={codeInput}
+              onChange={(e) => setCodeInput(e.target.value)}
+              placeholder="Access code"
+              style={{
+                width: "100%",
+                padding: "0.6rem 0.8rem",
+                borderRadius: 6,
+                border: "1px solid #4b5563",
+                background: "#020617",
+                color: "#f9fafb",
+                marginBottom: "0.75rem",
+              }}
+            />
+            {accessError && (
+              <div style={{ color: "#fca5a5", marginBottom: "0.75rem", fontSize: "0.85rem" }}>
+                {accessError}
+              </div>
+            )}
+            <button
+              type="submit"
+              style={{
+                width: "100%",
+                padding: "0.6rem 0.8rem",
+                borderRadius: 6,
+                border: "none",
+                background: "#2563eb",
+                color: "white",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Enter
+            </button>
+          </form>
+
+          <p
+            style={{
+              marginTop: "0.75rem",
+              fontSize: "0.75rem",
+              color: "#6b7280",
+            }}
+          >
+            For SBH Emergency Department staff only.
+          </p>
+        </div>
+      </main>
+    );
+  }
+  
   return (
     <main style={{ maxWidth: 800, margin: "0 auto", padding: "1rem" }}>
       <h1>Metri-Manager</h1>
