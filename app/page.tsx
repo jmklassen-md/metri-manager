@@ -8,7 +8,7 @@ type Shift = {
   date: string; // "2025-11-17"
   shiftName: string;
   startTime: string; // "08:00"
-  endTime: string; // "17:00"
+  endTime: string;   // "17:00"
   doctor: string;
   location?: string;
   raw?: string;
@@ -27,7 +27,12 @@ type ContactApiRow = {
   preferred: string | null;
 };
 
-type Mode = "sameDay" | "getTogether" | "periShift";
+type Mode = "sameDay" | "getTogether" | "periHang";
+
+type PeriSuggestion =
+  | "Greasy breakfast?"
+  | "Wanna grab a beer?"
+  | "Late lunch?";
 
 const CONTACTS_STORAGE_KEY = "metriManagerContacts";
 
@@ -57,10 +62,6 @@ function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
 
 function hoursDiff(later: Date, earlier: Date) {
   return (later.getTime() - earlier.getTime()) / (1000 * 60 * 60);
-}
-
-function minutesDiff(a: Date, b: Date) {
-  return Math.abs(a.getTime() - b.getTime()) / (1000 * 60);
 }
 
 function addDays(dateStr: string, days: number): string {
@@ -106,43 +107,31 @@ function formatPreference(contact?: Contact): string {
   }
 }
 
-// ---------- Peri-Shift suggestion helpers ----------
+// ---------- Peri-Shift classification ----------
 
-type PeriSuggestion = "breakfast" | "beer" | "lunch" | null;
-
-function classifyPeriSuggestion(start: Date, end: Date): PeriSuggestion {
+function classifyPeriSuggestion(
+  start: Date,
+  end: Date
+): PeriSuggestion | null {
   const endHour = end.getHours();
   const startHour = start.getHours();
 
-  // Greasy breakfast? (end between 05:00 and 10:00)
+  // Greasy breakfast: shifts ending between 05:00 and 10:00
   if (endHour >= 5 && endHour < 10) {
-    return "breakfast";
+    return "Greasy breakfast?";
   }
 
-  // Wanna grab a beer? (end after 14:00 or before 04:00)
+  // Wanna grab a beer: ending after 14:00 or before 04:00
   if (endHour >= 14 || endHour < 4) {
-    return "beer";
+    return "Wanna grab a beer?";
   }
 
-  // Late lunch? (start between 12:00 and 16:00)
+  // Late lunch: shifts starting between 12:00 and 16:00
   if (startHour >= 12 && startHour < 16) {
-    return "lunch";
+    return "Late lunch?";
   }
 
   return null;
-}
-
-function suggestionLabel(tag: PeriSuggestion | null): string {
-  switch (tag) {
-    case "breakfast":
-      return "Greasy breakfast?";
-    case "beer":
-      return "Wanna grab a beer?";
-    case "lunch":
-      return "Late lunch?";
-    default:
-      return "";
-  }
 }
 
 // ---------- Main component ----------
@@ -168,15 +157,20 @@ export default function Page() {
     e.preventDefault();
     const expected = ACCESS_CODE;
 
+    // If no access code is configured, just let them in
     if (!expected) {
       setHasAccess(true);
-      window.localStorage.setItem(ACCESS_STORAGE_KEY, "yes");
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(ACCESS_STORAGE_KEY, "yes");
+      }
       return;
     }
 
     if (codeInput.trim() === expected) {
       setHasAccess(true);
-      window.localStorage.setItem(ACCESS_STORAGE_KEY, "yes");
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(ACCESS_STORAGE_KEY, "yes");
+      }
       setAccessError("");
     } else {
       setAccessError("Access code is incorrect. Please try again.");
@@ -347,6 +341,27 @@ export default function Page() {
     return shifts.filter((s) => s.date === myShift.date);
   }, [myShift, shifts]);
 
+  // Helper: previous shift end (used by Same-Day Trades)
+  function findPreviousShiftEnd(
+    allShifts: Shift[],
+    doctor: string,
+    referenceStart: Date,
+    ignore: Shift[] = []
+  ): Date | null {
+    const ends: Date[] = [];
+    for (const s of allShifts) {
+      if (ignore.includes(s)) continue;
+      if (s.doctor !== doctor) continue;
+      const { end } = getShiftDateTimes(s);
+      if (!isNaN(end.getTime()) && end < referenceStart) {
+        ends.push(end);
+      }
+    }
+    if (!ends.length) return null;
+    ends.sort((a, b) => b.getTime() - a.getTime());
+    return ends[0];
+  }
+
   const tradeOptions = useMemo(() => {
     if (!myShift) return [];
 
@@ -398,28 +413,6 @@ export default function Page() {
 
   const myEmail = myContact?.email || "";
   const myPhone = myContact?.phone || "";
-
-  // ---------- Helper: previous shift end (used by Same-Day Trades) ----------
-
-  function findPreviousShiftEnd(
-    allShifts: Shift[],
-    doctor: string,
-    referenceStart: Date,
-    ignore: Shift[] = []
-  ): Date | null {
-    const ends: Date[] = [];
-    for (const s of allShifts) {
-      if (ignore.includes(s)) continue;
-      if (s.doctor !== doctor) continue;
-      const { end } = getShiftDateTimes(s);
-      if (!isNaN(end.getTime()) && end < referenceStart) {
-        ends.push(end);
-      }
-    }
-    if (!ends.length) return null;
-    ends.sort((a, b) => b.getTime() - a.getTime());
-    return ends[0];
-  }
 
   // ---------- Build messages & send (Same-Day Trades) ----------
 
@@ -615,7 +608,6 @@ ${contactLine}
 
     if (!relevant.length) return [];
 
-    // Determine date range from today to last shift date + 7 days
     const futureRelevant = relevant.filter((s) => {
       const d = new Date(s.date + "T00:00:00");
       return d >= today;
@@ -629,7 +621,6 @@ ${contactLine}
       .map((s) => s.date)
       .reduce((a, b) => (a > b ? a : b));
 
-    // Add a small buffer on the end for post nights
     maxDate = addDays(maxDate, 3);
 
     const days: GetTogetherDay[] = [];
@@ -653,15 +644,15 @@ ${contactLine}
       const warnings: string[] = [];
 
       for (const doc of groupDoctors) {
-        const sameDayShifts = relevant.filter(
+        const sameDayShiftsForDoc = relevant.filter(
           (s) => s.doctor === doc && s.date === dStr
         );
-        const prevDayShifts = relevant.filter(
+        const prevDayShiftsForDoc = relevant.filter(
           (s) => s.doctor === doc && s.date === prevDateStr
         );
 
         // 1) Evening conflict (17:00–22:00) on this date
-        for (const s of sameDayShifts) {
+        for (const s of sameDayShiftsForDoc) {
           const { start, end } = getShiftDateTimes(s);
           const overlapsEvening =
             start < eveningEnd && end > eveningStart;
@@ -675,7 +666,7 @@ ${contactLine}
         if (blocked) break;
 
         // 2) Pre-nights on this date (start ≥ 22:00)
-        for (const s of sameDayShifts) {
+        for (const s of sameDayShiftsForDoc) {
           const { start } = getShiftDateTimes(s);
           const startsLate =
             sameDate(start, thisDate) && start >= preNightStart;
@@ -689,7 +680,7 @@ ${contactLine}
         }
 
         // 3) Coming off days (worked between 10:00 and 14:00)
-        for (const s of sameDayShifts) {
+        for (const s of sameDayShiftsForDoc) {
           const { start, end } = getShiftDateTimes(s);
           const overlapsDay = start < day14 && end > day10;
           if (overlapsDay) {
@@ -701,16 +692,14 @@ ${contactLine}
           }
         }
 
-        // 4) Post-nights: previous day shift starts ≥ 22:00 and crosses midnight
-        for (const s of prevDayShifts) {
+        // 4) Post-nights: previous day shift starts ≥ 22:00 and overlaps 00–06
+        for (const s of prevDayShiftsForDoc) {
           const { start, end } = getShiftDateTimes(s);
           const prevDay = new Date(prevDateStr + "T00:00:00");
           const startsPrevLate =
             sameDate(start, prevDay) && start.getHours() >= 22;
-          const crossesMidnight = end > zero;
-          const overlapsEarly = start < six && end > zero; // some portion between 00–06
-
-          if (startsPrevLate && crossesMidnight && overlapsEarly) {
+          const overlapsEarly = start < six && end > zero;
+          if (startsPrevLate && overlapsEarly) {
             warnings.push(
               `⚠ Warning: ${doc} is post-nights (${s.shiftName} on ${formatHumanDate(
                 s.date
@@ -725,7 +714,6 @@ ${contactLine}
       }
     }
 
-    // Sort & return
     days.sort((a, b) => a.date.localeCompare(b.date));
     return days;
   }, [groupDoctors, shifts]);
@@ -804,6 +792,8 @@ ${contactLine}
   type PeriHangEvent = {
     dateKey: string;
     dateLabel: string;
+    timeLabel: string;
+    kind: "start" | "end"; // cluster type
     participants: {
       doctor: string;
       shiftName: string;
@@ -819,6 +809,7 @@ ${contactLine}
     const now = new Date();
     now.setSeconds(0, 0);
 
+    // Only consider shifts for the selected doctors, with future (or ongoing) end times
     const relevant = shifts.filter((s) => {
       const doc = (s.doctor || "").trim();
       if (!periDoctors.includes(doc)) return false;
@@ -828,168 +819,180 @@ ${contactLine}
 
     if (relevant.length === 0) return [];
 
-    const eventsMap = new Map<string, PeriHangEvent>();
+    type Node = {
+      doctor: string;
+      shift: Shift;
+      when: Date; // either start or end
+      kind: "start" | "end";
+    };
 
-    for (let i = 0; i < relevant.length; i++) {
-      for (let j = i + 1; j < relevant.length; j++) {
-        const a = relevant[i];
-        const b = relevant[j];
-        if (a.doctor === b.doctor) continue;
+    const nodes: Node[] = [];
+    for (const s of relevant) {
+      const { start, end } = getShiftDateTimes(s);
+      if (!isNaN(start.getTime())) {
+        nodes.push({ doctor: s.doctor, shift: s, when: start, kind: "start" });
+      }
+      if (!isNaN(end.getTime())) {
+        nodes.push({ doctor: s.doctor, shift: s, when: end, kind: "end" });
+      }
+    }
 
-        const { start: aStart, end: aEnd } = getShiftDateTimes(a);
-        const { start: bStart, end: bEnd } = getShiftDateTimes(b);
+    const MAX_DIFF_MS = 45 * 60 * 1000; // 45 minutes
+    const seen = new Set<string>();
+    const events: PeriHangEvent[] = [];
 
-        const diffs = [
-          minutesDiff(aEnd, bEnd),
-          minutesDiff(aStart, bStart),
-          minutesDiff(aEnd, bStart),
-          minutesDiff(aStart, bEnd),
-        ];
+    function buildClusters(kind: "start" | "end") {
+      const list = nodes
+        .filter((n) => n.kind === kind)
+        .sort((a, b) => a.when.getTime() - b.when.getTime());
 
-        const minDiff = Math.min(...diffs);
-        if (minDiff > 45) continue; // Not a peri-shift hang
+      let left = 0;
+      for (let right = 0; right < list.length; right++) {
+        // Maintain a window where max(time) - min(time) <= 45min
+        while (
+          list[right].when.getTime() - list[left].when.getTime() >
+          MAX_DIFF_MS
+        ) {
+          left++;
+        }
 
-        const anchor = aStart < bStart ? aStart : bStart;
-        const y = anchor.getFullYear();
-        const m = anchor.getMonth() + 1;
-        const d = anchor.getDate();
-        const dateKey = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-        const dateLabel = anchor.toLocaleDateString(undefined, {
+        const windowNodes = list.slice(left, right + 1);
+        if (windowNodes.length < 2) continue;
+
+        // Group by doctor, keep earliest event per doctor in this window
+        const byDoctor = new Map<string, Node>();
+        for (const n of windowNodes) {
+          const existing = byDoctor.get(n.doctor);
+          if (!existing || n.when < existing.when) {
+            byDoctor.set(n.doctor, n);
+          }
+        }
+
+        if (byDoctor.size < 2) continue;
+
+        const participantsNodes = Array.from(byDoctor.values());
+        const docsSorted = Array.from(byDoctor.keys()).sort();
+
+        const times = participantsNodes.map((n) => n.when.getTime());
+        const minTime = Math.min(...times);
+        const maxTime = Math.max(...times);
+
+        // Safety: ensure *all* are within 45 minutes of each other
+        if (maxTime - minTime > MAX_DIFF_MS) continue;
+
+        const key = `${kind}|${docsSorted.join(",")}|${minTime}|${maxTime}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const rep = new Date(minTime);
+        const timeLabel = rep.toLocaleTimeString(undefined, {
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+
+        const y = rep.getFullYear();
+        const m = rep.getMonth() + 1;
+        const d = rep.getDate();
+        const dateKey = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(
+          2,
+          "0"
+        )}`;
+        const dateLabel = rep.toLocaleDateString(undefined, {
           weekday: "short",
           month: "short",
           day: "numeric",
           year: "numeric",
         });
 
-        let evt = eventsMap.get(dateKey);
-        if (!evt) {
-          evt = { dateKey, dateLabel, participants: [] };
-          eventsMap.set(dateKey, evt);
-        }
+        const participants = participantsNodes.map((n) => {
+          const { start, end } = getShiftDateTimes(n.shift);
+          return {
+            doctor: n.doctor,
+            shiftName: n.shift.shiftName,
+            startTime: n.shift.startTime,
+            endTime: n.shift.endTime,
+            suggestion: classifyPeriSuggestion(start, end),
+          };
+        });
 
-        const addParticipant = (s: Shift, dtStart: Date, dtEnd: Date) => {
-          const exists = evt!.participants.some(
-            (p) =>
-              p.doctor === s.doctor &&
-              p.shiftName === s.shiftName &&
-              p.startTime === s.startTime &&
-              p.endTime === s.endTime
-          );
-          if (!exists) {
-            evt!.participants.push({
-              doctor: s.doctor,
-              shiftName: s.shiftName,
-              startTime: s.startTime,
-              endTime: s.endTime,
-              suggestion: classifyPeriSuggestion(dtStart, dtEnd),
-            });
-          }
-        };
-
-        addParticipant(a, aStart, aEnd);
-        addParticipant(b, bStart, bEnd);
+        events.push({
+          dateKey,
+          dateLabel,
+          timeLabel,
+          kind,
+          participants,
+        });
       }
     }
 
-    const result = Array.from(eventsMap.values());
-    result.sort((a, b) => a.dateKey.localeCompare(b.dateKey));
-    return result;
+    // Build clusters separately for starts and ends
+    buildClusters("start");
+    buildClusters("end");
+
+    events.sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+    return events;
   }, [periDoctors, shifts]);
 
-  // ---------- Peri-Shift Hang: group email / SMS ----------
+  // ---------- Peri-Shift Hang helpers: email / SMS ----------
 
-  const buildPeriGroupMessage = (evt: PeriHangEvent) => {
-    if (periDoctors.length === 0) return "";
+  function buildPeriEmailBody(event: PeriHangEvent): string {
+    const who = event.participants.map((p) => p.doctor).join(", ");
+    const introKind =
+      event.kind === "start"
+        ? "starting shifts around"
+        : "finishing shifts around";
 
-    const lines: string[] = [];
-    lines.push("PERI-SHIFT HANG opportunity!");
-    lines.push(`Date: ${evt.dateLabel}`);
-    lines.push("");
-
-    for (const p of evt.participants) {
-      const tag = suggestionLabel(p.suggestion);
-      lines.push(
-        `- Dr. ${p.doctor}: ${p.shiftName} ${p.startTime}–${p.endTime}${
-          tag ? `  [${tag}]` : ""
-        }`
-      );
+    let body = `Hi everyone,\n\nWe found a peri-shift hang opportunity for ${who}:\n\n`;
+    body += `  • ${event.dateLabel}, ${introKind} ${event.timeLabel}\n\n`;
+    body += "Details:\n";
+    for (const p of event.participants) {
+      const suggestionText = p.suggestion ? ` – ${p.suggestion}` : "";
+      body += `  • Dr. ${p.doctor}: ${p.shiftName} ${p.startTime}–${p.endTime}${suggestionText}\n`;
     }
+    body +=
+      "\nIf this works for you, please reply-all.\n\n(Generated by Metri-Manager – mode: Peri-Shift Hang.)";
+    return body;
+  }
 
-    lines.push("");
-    lines.push(`Group: ${periDoctors.map((d) => `Dr. ${d}`).join(", ")}`);
-    lines.push("");
-    lines.push("(Generated by the Metri-Manager – mode: Peri-Shift Hang.)");
+  function handleEmailPeriEvent(event: PeriHangEvent) {
+    const subject = encodeURIComponent(
+      `Peri-shift hang option: ${event.dateLabel} (${event.timeLabel})`
+    );
+    const body = encodeURIComponent(buildPeriEmailBody(event));
 
-    return lines.join("\n");
-  };
-
-  const handlePeriGroupEmail = (evt: PeriHangEvent) => {
-    const message = buildPeriGroupMessage(evt);
-    if (!message) return;
-
-    const emails: string[] = [];
-    for (const d of periDoctors) {
-      const c = contacts[d];
-      if (c?.email) emails.push(c.email);
-    }
+    const emails = event.participants
+      .map((p) => contacts[p.doctor]?.email)
+      .filter((e) => e && e.length > 0) as string[];
 
     const to = emails.join(",");
-    const subject = encodeURIComponent(`Peri-Shift Hang: ${evt.dateLabel}`);
-    const body = encodeURIComponent(message);
+    const mailto = `mailto:${encodeURIComponent(
+      to
+    )}?subject=${subject}&body=${body}`;
+    window.location.href = mailto;
+  }
 
-    if (to) {
-      const mailto = `mailto:${encodeURIComponent(
-        to
-      )}?subject=${subject}&body=${body}`;
-      window.location.href = mailto;
-    } else if (navigator.clipboard) {
+  function handleCopyPeriSms(event: PeriHangEvent) {
+    const body = buildPeriEmailBody(event);
+    const smsText =
+      body +
+      "\n\n(Copy/paste this into a group text or WhatsApp chat.)";
+
+    if (navigator.clipboard) {
       navigator.clipboard
-        .writeText(message)
+        .writeText(smsText)
         .then(() => {
           alert(
-            "Peri-Shift hang details copied to clipboard.\nPaste into an email to your group."
+            "Peri-shift hang text copied to clipboard.\nPaste it into your SMS or group chat."
           );
         })
-        .catch(() => alert(message));
+        .catch(() => alert(smsText));
     } else {
-      alert(message);
+      alert(smsText);
     }
-  };
+  }
 
-  const handlePeriGroupSms = (evt: PeriHangEvent) => {
-    const message = buildPeriGroupMessage(evt);
-    if (!message) return;
+  // ---------- ACCESS GATE ----------
 
-    const phones: string[] = [];
-    for (const d of periDoctors) {
-      const c = contacts[d];
-      if (c?.phone) phones.push(c.phone);
-    }
-
-    const to = phones.join(",");
-    const smsUrl = `sms:${encodeURIComponent(to)}?body=${encodeURIComponent(
-      message
-    )}`;
-
-    if (to) {
-      window.location.href = smsUrl;
-    } else if (navigator.clipboard) {
-      navigator.clipboard
-        .writeText(message)
-        .then(() => {
-          alert(
-            "Peri-Shift hang details copied to clipboard.\nPaste into your texting app."
-          );
-        })
-        .catch(() => alert(message));
-    } else {
-      alert(message);
-    }
-  };
-
-  // ---------- Render ----------
-
-  // --- ACCESS GATE: if they haven't unlocked, show the code screen ---
   if (!hasAccess) {
     return (
       <main
@@ -1083,12 +1086,14 @@ ${contactLine}
     );
   }
 
+  // ---------- MAIN RENDER ----------
+
   return (
     <main style={{ maxWidth: 800, margin: "0 auto", padding: "1rem" }}>
       <h1>Metri-Manager</h1>
       <p style={{ marginBottom: "1rem" }}>
-        SBH Shift Helper – Same-Day Trades, Get Together &amp; Peri-Shift Hang
-        planning.
+        SBH Shift Helper – Same-Day Trades, Get Together planning, and
+        Peri-Shift Hang.
       </p>
 
       {/* Mode toggle */}
@@ -1123,13 +1128,13 @@ ${contactLine}
         </button>
         <button
           type="button"
-          onClick={() => setMode("periShift")}
+          onClick={() => setMode("periHang")}
           style={{
             padding: "0.5rem 1rem",
             borderRadius: "999px",
             border: "1px solid #333",
-            background: mode === "periShift" ? "#1d4ed8" : "#fff",
-            color: mode === "periShift" ? "#fff" : "#000",
+            background: mode === "periHang" ? "#1d4ed8" : "#fff",
+            color: mode === "periHang" ? "#fff" : "#000",
           }}
         >
           Peri-Shift Hang
@@ -1450,14 +1455,18 @@ ${contactLine}
                           >
                             <button
                               type="button"
-                              onClick={() => handleSendEmailOffer(t.candidate)}
+                              onClick={() =>
+                                handleSendEmailOffer(t.candidate)
+                              }
                               style={{ padding: "0.25rem 0.5rem" }}
                             >
                               Email / copy
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleSendSmsOffer(t.candidate)}
+                              onClick={() =>
+                                handleSendSmsOffer(t.candidate)
+                              }
                               style={{ padding: "0.25rem 0.5rem" }}
                             >
                               SMS / copy
@@ -1590,7 +1599,7 @@ ${contactLine}
       )}
 
       {/* ---------------- PERI-SHIFT HANG ---------------- */}
-      {mode === "periShift" && (
+      {mode === "periHang" && (
         <section
           style={{
             border: "1px solid #ccc",
@@ -1600,24 +1609,17 @@ ${contactLine}
         >
           <h2>Peri-Shift Hang</h2>
           <p>
-            Select a group of doctors and I’ll look for{" "}
-            <strong>future shifts</strong> where their start and/or end times
-            are within <strong>45 minutes</strong> of each other. I’ll label
-            each opportunity with:
+            Select a group of doctors. I’ll find <strong>future</strong>{" "}
+            incidents where everyone in the group is{" "}
+            <strong>starting</strong> a shift within 45 minutes of each other
+            (start–start clusters) or <strong>ending</strong> a shift within 45
+            minutes of each other (end–end clusters).
           </p>
-          <ul>
-            <li>
-              <strong>Greasy breakfast?</strong> – finished between 05:00 and
-              10:00
-            </li>
-            <li>
-              <strong>Wanna grab a beer?</strong> – finished after 14:00 or
-              before 04:00
-            </li>
-            <li>
-              <strong>Late lunch?</strong> – started between 12:00 and 16:00
-            </li>
-          </ul>
+          <p>
+            I’ll also label events as <em>Greasy breakfast?</em>,{" "}
+            <em>Wanna grab a beer?</em>, or <em>Late lunch?</em> based on shift
+            times.
+          </p>
 
           <h3>Select doctors</h3>
           <div
@@ -1657,131 +1659,56 @@ ${contactLine}
             })}
           </div>
 
-          {periDoctors.length < 2 && (
-            <p>Select at least two doctors to see peri-shift hang options.</p>
+          {periDoctors.length === 0 && (
+            <p>Select at least two doctors to look for peri-shift hangs.</p>
           )}
 
-          {periDoctors.length >= 2 && periHangEvents.length === 0 && (
-            <p>No peri-shift hang opportunities found for this group.</p>
+          {periDoctors.length > 0 && periHangEvents.length === 0 && (
+            <p>No peri-shift hang opportunities found in the future schedule.</p>
           )}
 
-          {periDoctors.length >= 2 && periHangEvents.length > 0 && (
+          {periDoctors.length > 0 && periHangEvents.length > 0 && (
             <>
               <h3>Peri-Shift Hang Opportunities</h3>
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "1rem",
-                  marginTop: "0.5rem",
-                }}
-              >
-                {periHangEvents.map((evt) => {
-                  const tags = Array.from(
-                    new Set(
-                      evt.participants
-                        .map((p) => p.suggestion)
-                        .filter((t): t is PeriSuggestion => t !== null)
-                    )
-                  );
-                  const tagLabel = tags
-                    .map((t) => suggestionLabel(t))
-                    .filter(Boolean)
-                    .join(" / ");
-
-                  return (
-                    <div
-                      key={evt.dateKey}
-                      style={{
-                        border: "1px solid #eee",
-                        borderRadius: 8,
-                        padding: "0.75rem",
-                      }}
+              {periHangEvents.map((evt, idx) => (
+                <div
+                  key={`${evt.dateKey}-${idx}`}
+                  style={{
+                    borderTop: "1px solid #eee",
+                    paddingTop: "0.5rem",
+                    marginTop: "0.5rem",
+                  }}
+                >
+                  <strong>{evt.dateLabel}</strong>{" "}
+                  <span style={{ fontSize: "0.9rem", color: "#555" }}>
+                    – {evt.kind === "start" ? "Starting around" : "Ending around"}{" "}
+                    {evt.timeLabel}
+                  </span>
+                  <ul style={{ marginTop: "0.25rem", paddingLeft: "1.25rem" }}>
+                    {evt.participants.map((p, i) => (
+                      <li key={i} style={{ fontSize: "0.9rem" }}>
+                        Dr. {p.doctor}: {p.shiftName} {p.startTime}–{p.endTime}
+                        {p.suggestion ? ` – ${p.suggestion}` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                  <div style={{ marginTop: "0.25rem" }}>
+                    <button
+                      type="button"
+                      onClick={() => handleEmailPeriEvent(evt)}
+                      style={{ marginRight: "0.5rem" }}
                     >
-                      <div
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                          marginBottom: "0.5rem",
-                        }}
-                      >
-                        <div>
-                          <strong>{evt.dateLabel}</strong>
-                          {tagLabel && (
-                            <div
-                              style={{
-                                fontSize: "0.85rem",
-                                color: "#2563eb",
-                                marginTop: "0.15rem",
-                              }}
-                            >
-                              {tagLabel}
-                            </div>
-                          )}
-                        </div>
-                        <div
-                          style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}
-                        >
-                          <button
-                            type="button"
-                            onClick={() => handlePeriGroupEmail(evt)}
-                            style={{
-                              padding: "0.25rem 0.5rem",
-                              fontSize: "0.85rem",
-                            }}
-                          >
-                            Email group
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handlePeriGroupSms(evt)}
-                            style={{
-                              padding: "0.25rem 0.5rem",
-                              fontSize: "0.85rem",
-                            }}
-                          >
-                            SMS group
-                          </button>
-                        </div>
-                      </div>
-
-                      <div style={{ overflowX: "auto" }}>
-                        <table
-                          border={1}
-                          cellPadding={4}
-                          style={{
-                            borderCollapse: "collapse",
-                            width: "100%",
-                            minWidth: 400,
-                          }}
-                        >
-                          <thead>
-                            <tr>
-                              <th>Doctor</th>
-                              <th>Shift</th>
-                              <th>Start</th>
-                              <th>End</th>
-                              <th>Idea</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {evt.participants.map((p, idx) => (
-                              <tr key={idx}>
-                                <td>{p.doctor}</td>
-                                <td>{p.shiftName}</td>
-                                <td>{p.startTime}</td>
-                                <td>{p.endTime}</td>
-                                <td>{suggestionLabel(p.suggestion)}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+                      Email this hang to group
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyPeriSms(evt)}
+                    >
+                      Copy text for SMS / chat
+                    </button>
+                  </div>
+                </div>
+              ))}
             </>
           )}
         </section>
