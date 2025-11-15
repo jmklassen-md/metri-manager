@@ -31,6 +31,11 @@ type Mode = "sameDay" | "getTogether";
 
 const CONTACTS_STORAGE_KEY = "metriManagerContacts";
 
+const ACCESS_CODE =
+  process.env.NEXT_PUBLIC_ACCESS_CODE?.trim() || "";
+
+const ACCESS_STORAGE_KEY = "metri-manager-access-ok";
+
 // Optional built-in seeds if you want defaults
 const SEED_CONTACTS: Record<string, Contact> = {};
 
@@ -104,6 +109,38 @@ function formatPreference(contact?: Contact): string {
 export default function Page() {
   const [mode, setMode] = useState<Mode>("sameDay");
 
+    // --- Access Code State ---
+  const [hasAccess, setHasAccess] = useState(false);
+  const [codeInput, setCodeInput] = useState("");
+  const [accessError, setAccessError] = useState("");
+
+  // Check if already unlocked on this device
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(ACCESS_STORAGE_KEY);
+    if (stored === "yes") {
+      setHasAccess(true);
+    }
+  }, []);
+
+  const handleAccessSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const expected = ACCESS_CODE;
+
+    if (!expected) {
+      setHasAccess(true);
+      window.localStorage.setItem(ACCESS_STORAGE_KEY, "yes");
+      return;
+    }
+
+    if (codeInput.trim() === expected) {
+      setHasAccess(true);
+      window.localStorage.setItem(ACCESS_STORAGE_KEY, "yes");
+      setAccessError("");
+    } else {
+      setAccessError("Access code is incorrect. Please try again.");
+    }
+  };
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [error, setError] = useState<string | null>(null);
 
