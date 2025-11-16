@@ -4,7 +4,7 @@ import React, { useEffect, useState } from "react";
 import * as XLSX from "xlsx";
 
 /* ------------------------------------------------
-   Shared types
+   Types
 ------------------------------------------------ */
 
 type Shift = {
@@ -32,7 +32,7 @@ type ContactApiRow = {
 const CONTACTS_STORAGE_KEY = "metriManagerContacts";
 
 /* ------------------------------------------------
-   Small helpers
+   Helper functions
 ------------------------------------------------ */
 
 function isDateHeader(value: string): boolean {
@@ -111,7 +111,7 @@ function formatHumanDate(dateStr: string): string {
 }
 
 /* ------------------------------------------------
-   XLSX parser (same logic as marketplace_xlsx page)
+   XLSX parser (same as marketplace_xlsx debug)
 ------------------------------------------------ */
 
 function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
@@ -124,15 +124,13 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
 
   const range = XLSX.utils.decode_range(ref);
 
-  // Active date per column
   const datesByCol: (string | null)[] = new Array(range.e.c + 1).fill(null);
   const shifts: Shift[] = [];
 
-  // Guess year from first header we see
   let detectedYear: number | undefined;
 
   for (let r = range.s.r; r <= range.e.r; r++) {
-    // Pass 1: update date headers
+    // Pass 1: date headers
     for (let c = range.s.c; c <= range.e.c; c++) {
       const cellAddr = XLSX.utils.encode_cell({ r, c });
       const cell = sheet[cellAddr];
@@ -149,7 +147,7 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
       }
     }
 
-    // Pass 2: find shift cells
+    // Pass 2: shift cells
     for (let c = range.s.c; c <= range.e.c; c++) {
       const cellAddr = XLSX.utils.encode_cell({ r, c });
       const cell = sheet[cellAddr];
@@ -171,7 +169,6 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
       const startTime = m[2].padStart(5, "0");
       const endTime = m[3].padStart(5, "0");
 
-      // Name row is next row down in same column
       const docCellAddr = XLSX.utils.encode_cell({ r: r + 1, c });
       const docCell = sheet[docCellAddr];
       const docText = typeof docCell?.v === "string" ? docCell.v : "";
@@ -196,7 +193,14 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
 ------------------------------------------------ */
 
 export default function TradeFishingPage() {
-  const [yourName, setYourName] = useState(""); // who are you?
+  // doctor dropdown (like Same-Day Trades)
+  const [doctorNames, setDoctorNames] = useState<string[]>([]);
+  const [doctorsLoading, setDoctorsLoading] = useState(true);
+  const [doctorsError, setDoctorsError] = useState<string | null>(null);
+
+  const [yourName, setYourName] = useState(""); // selected doctor
+
+  // contact info
   const [contacts, setContacts] = useState<Record<string, Contact>>({});
   const [contactsLoaded, setContactsLoaded] = useState(false);
   const [contactDraft, setContactDraft] = useState<Contact>({
@@ -206,11 +210,43 @@ export default function TradeFishingPage() {
   });
   const [contactSavedMessage, setContactSavedMessage] = useState("");
 
+  // marketplace XLSX parsing
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  /* ---------- Load contacts (DB + localStorage fallback) ---------- */
+  /* ---------- Load doctor list (same idea as Same-Day) ---------- */
+
+  useEffect(() => {
+    const fetchDoctors = async () => {
+      try {
+        setDoctorsLoading(true);
+        setDoctorsError(null);
+
+        // Expecting /api/doctors to return string[]
+        const res = await fetch("/api/doctors");
+        if (!res.ok) throw new Error("Failed to fetch doctors");
+        const data = (await res.json()) as string[];
+
+        const unique = Array.from(new Set(data)).sort((a, b) =>
+          a.localeCompare(b)
+        );
+        setDoctorNames(unique);
+      } catch (err) {
+        console.error("Error loading doctors:", err);
+        setDoctorsError(
+          "Could not load doctor list from the schedule. You can still type your name manually."
+        );
+        setDoctorNames([]);
+      } finally {
+        setDoctorsLoading(false);
+      }
+    };
+
+    fetchDoctors();
+  }, []);
+
+  /* ---------- Load contacts (DB + localStorage) ---------- */
 
   useEffect(() => {
     async function loadContacts() {
@@ -241,7 +277,7 @@ export default function TradeFishingPage() {
 
         setContacts({ ...fromDb, ...fromLocal });
       } catch {
-        // API failed – local storage only
+        // API failed – local-only
         try {
           const raw =
             typeof window !== "undefined"
@@ -260,7 +296,7 @@ export default function TradeFishingPage() {
     loadContacts();
   }, []);
 
-  // Persist contacts to localStorage whenever they change
+  // Persist contacts to localStorage
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -275,11 +311,12 @@ export default function TradeFishingPage() {
 
   useEffect(() => {
     setContactSavedMessage("");
-    if (!yourName.trim()) {
+    const name = yourName.trim();
+    if (!name) {
       setContactDraft({ email: "", phone: "", preferred: "none" });
       return;
     }
-    const existing = contacts[yourName.trim()];
+    const existing = contacts[name];
     setContactDraft({
       email: existing?.email || "",
       phone: existing?.phone || "",
@@ -365,11 +402,11 @@ export default function TradeFishingPage() {
       <h1>Metri-Manager – Trade Fishing (Prototype)</h1>
       <p style={{ marginBottom: "1rem" }}>
         Upload a MetricAid marketplace <code>.xlsx</code> export. I&apos;ll
-        parse all marketplace shifts below. In a later step, we&apos;ll add the
-        &quot;find good trades&quot; engine on top of this.
+        parse all marketplace shifts below. Next step will be adding the actual
+        &quot;find good trades&quot; logic on top of this.
       </p>
 
-      {/* Who are you? */}
+      {/* 1. Pick your name (dropdown, Same-Day style) */}
       <section
         style={{
           border: "1px solid #ccc",
@@ -378,19 +415,41 @@ export default function TradeFishingPage() {
           marginBottom: "1rem",
         }}
       >
-        <h2>1. Identify yourself</h2>
-        <p>
-          Enter your name <em>exactly</em> as it appears in MetricAid (e.g.{" "}
-          <code>Klassen</code>). This lets Trade Fishing match marketplace
-          shifts to your contact info.
-        </p>
-        <input
-          type="text"
-          value={yourName}
-          onChange={(e) => setYourName(e.target.value)}
-          placeholder="Your last name (e.g. Klassen)"
-          style={{ width: "100%", maxWidth: 400, padding: "0.5rem" }}
-        />
+        <h2>1. Pick your name</h2>
+
+        {doctorsLoading && <p>Loading doctor list from your calendars…</p>}
+        {doctorsError && (
+          <p style={{ color: "red", marginBottom: "0.5rem" }}>{doctorsError}</p>
+        )}
+
+        {doctorNames.length > 0 ? (
+          <select
+            value={yourName}
+            onChange={(e) => setYourName(e.target.value)}
+            style={{
+              width: "100%",
+              maxWidth: 400,
+              padding: "0.5rem",
+              marginBottom: "0.5rem",
+            }}
+          >
+            <option value="">Select your name…</option>
+            {doctorNames.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          // Fallback if /api/doctors didn’t work for some reason
+          <input
+            type="text"
+            value={yourName}
+            onChange={(e) => setYourName(e.target.value)}
+            placeholder="Your last name (e.g. Klassen)"
+            style={{ width: "100%", maxWidth: 400, padding: "0.5rem" }}
+          />
+        )}
 
         {yourName.trim() && (
           <>
@@ -519,7 +578,7 @@ export default function TradeFishingPage() {
         )}
       </section>
 
-      {/* XLSX upload + parsed view */}
+      {/* 2. XLSX upload + parsed view */}
       <section
         style={{
           border: "1px solid #ccc",
@@ -545,7 +604,7 @@ export default function TradeFishingPage() {
             <p style={{ fontSize: "0.9rem", color: "#555" }}>
               This is just a sanity-check table for now. Next step will be to
               filter these into smart Trade Fishing suggestions based on your
-              own schedule and turnaround rules.
+              schedule and turnaround rules.
             </p>
             <div
               style={{
