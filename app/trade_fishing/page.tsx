@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 
 type Shift = {
@@ -10,6 +10,14 @@ type Shift = {
   endTime: string;    // "09:00"
   doctor: string;     // e.g. "Klassen"
   rawCell: string;    // original text for debugging
+};
+
+type ApiShift = {
+  date: string;
+  shiftName: string;
+  startTime: string;
+  endTime: string;
+  doctor: string;
 };
 
 /** Detect cells like "Mon, Nov 17" */
@@ -157,6 +165,46 @@ type ShiftGroup = {
 };
 
 export default function MarketplaceXlsxPage() {
+  // ---- identity + contact state ----
+  const [doctorList, setDoctorList] = useState<string[]>([]);
+  const [doctorLoadError, setDoctorLoadError] = useState<string | null>(null);
+  const [selectedDoctor, setSelectedDoctor] = useState("");
+  const [manualDoctor, setManualDoctor] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+
+  const effectiveDoctorName = (selectedDoctor || manualDoctor).trim();
+
+  // Load doctor list from /api/schedule (same source as Same-Day mode)
+  useEffect(() => {
+    async function loadDoctors() {
+      try {
+        const res = await fetch("/api/schedule");
+        if (!res.ok) throw new Error("Failed to fetch schedule");
+        const data = (await res.json()) as ApiShift[];
+        if (!Array.isArray(data)) throw new Error("Schedule not in array form");
+
+        const docs = Array.from(
+          new Set(
+            data
+              .map((s) => (s.doctor || "").trim())
+              .filter((n) => n.length > 0)
+          )
+        ).sort((a, b) => a.localeCompare(b));
+
+        setDoctorList(docs);
+      } catch (err) {
+        console.error(err);
+        setDoctorLoadError(
+          "Could not load doctor list from the schedule. You can still type your name manually."
+        );
+      }
+    }
+
+    loadDoctors();
+  }, []);
+
+  // ---- XLSX parsing state ----
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -220,20 +268,136 @@ export default function MarketplaceXlsxPage() {
 
   return (
     <main style={{ maxWidth: 1000, margin: "0 auto", padding: "1rem" }}>
-      <h1>Marketplace XLSX Parser (Prototype)</h1>
+      <h1>Metri-Manager – Trade Fishing (Prototype)</h1>
       <p>
-        Upload a MetricAid <code>.xlsx</code> export (the one that includes your
-        own schedule + marketplace). This tool will pull out individual shifts
-        and show only <strong>future</strong> ones, organized by date.
+        Upload a MetricAid{" "}
+        <code>.xlsx</code> export (the one that includes your own schedule +
+        marketplace). This prototype parses the marketplace shifts, showing{" "}
+        <strong>future</strong> shifts grouped by date. Next step will be the
+        actual &quot;find good trades&quot; logic.
       </p>
 
-      <div style={{ margin: "1rem 0" }}>
-        <input type="file" accept=".xlsx,.xls" onChange={handleFileChange} />
-      </div>
+      {/* 1. Pick your name */}
+      <section
+        style={{
+          border: "1px solid #ddd",
+          borderRadius: 8,
+          padding: "1rem",
+          marginBottom: "1rem",
+        }}
+      >
+        <h2>1. Pick your name</h2>
 
-      {loading && <p>Reading and parsing XLSX…</p>}
-      {error && <p style={{ color: "red" }}>{error}</p>}
+        {doctorLoadError && (
+          <p style={{ color: "red", marginBottom: "0.5rem" }}>
+            {doctorLoadError}
+          </p>
+        )}
 
+        {doctorList.length > 0 && (
+          <div style={{ marginBottom: "0.75rem" }}>
+            <label style={{ display: "block", marginBottom: "0.25rem" }}>
+              Choose from schedule list:
+            </label>
+            <select
+              value={selectedDoctor}
+              onChange={(e) => setSelectedDoctor(e.target.value)}
+              style={{ width: "100%", maxWidth: 400, padding: "0.4rem" }}
+            >
+              <option value="">-- Select your name --</option>
+              {doctorList.map((doc) => (
+                <option key={doc} value={doc}>
+                  {doc}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div style={{ marginBottom: "0.75rem" }}>
+          <label style={{ display: "block", marginBottom: "0.25rem" }}>
+            Or type your last name:
+          </label>
+          <input
+            type="text"
+            value={manualDoctor}
+            onChange={(e) => setManualDoctor(e.target.value)}
+            placeholder="Your last name (e.g. Klassen)"
+            style={{ width: "100%", maxWidth: 400, padding: "0.4rem" }}
+          />
+        </div>
+
+        <p style={{ fontSize: "0.85rem", color: "#555" }}>
+          Current name:{" "}
+          <strong>{effectiveDoctorName || "(none selected yet)"}</strong>
+        </p>
+      </section>
+
+      {/* 2. Optional contact info */}
+      <section
+        style={{
+          border: "1px solid #ddd",
+          borderRadius: 8,
+          padding: "1rem",
+          marginBottom: "1rem",
+        }}
+      >
+        <h2>2. Optional contact info</h2>
+        <p style={{ fontSize: "0.9rem", color: "#555" }}>
+          This is just for your own reference while you&apos;re fishing for
+          trades (for example, to copy-paste into emails or texts). We&apos;re
+          not yet saving this to the shared contacts list.
+        </p>
+        <div style={{ marginBottom: "0.5rem" }}>
+          <label style={{ display: "block", marginBottom: "0.25rem" }}>
+            Email:
+          </label>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@example.com"
+            style={{ width: "100%", maxWidth: 400, padding: "0.4rem" }}
+          />
+        </div>
+        <div style={{ marginBottom: "0.5rem" }}>
+          <label style={{ display: "block", marginBottom: "0.25rem" }}>
+            Phone:
+          </label>
+          <input
+            type="tel"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            placeholder="+1-204-555-1234"
+            style={{ width: "100%", maxWidth: 400, padding: "0.4rem" }}
+          />
+        </div>
+      </section>
+
+      {/* 3. Upload XLSX */}
+      <section
+        style={{
+          border: "1px solid #ddd",
+          borderRadius: 8,
+          padding: "1rem",
+          marginBottom: "1rem",
+        }}
+      >
+        <h2>3. Upload marketplace spreadsheet</h2>
+        <p style={{ marginBottom: "0.75rem" }}>
+          Choose the MetricAid <code>.xlsx</code> export that includes your own
+          shifts plus marketplace shifts.
+        </p>
+
+        <div style={{ margin: "0.5rem 0 1rem" }}>
+          <input type="file" accept=".xlsx,.xls" onChange={handleFileChange} />
+        </div>
+
+        {loading && <p>Reading and parsing XLSX…</p>}
+        {error && <p style={{ color: "red" }}>{error}</p>}
+      </section>
+
+      {/* Parsed output */}
       {groupedFutureShifts.length > 0 && (
         <>
           <p>
