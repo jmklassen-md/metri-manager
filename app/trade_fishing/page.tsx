@@ -3,6 +3,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 
+// ---------- Types ----------
+
 type Shift = {
   date: string;       // "2025-11-17"
   shiftName: string;  // "R5", "Surge-AM", etc.
@@ -19,6 +21,21 @@ type ApiShift = {
   endTime: string;
   doctor: string;
 };
+
+type Contact = {
+  email: string;
+  phone: string;
+  preferred: "email" | "sms" | "either" | "none";
+};
+
+type ShiftGroup = {
+  date: string;
+  shifts: Shift[];
+};
+
+const TF_CONTACT_STORAGE_KEY = "metriManagerTradeFishingContact";
+
+// ---------- Helpers: dates / parsing ----------
 
 /** Detect cells like "Mon, Nov 17" */
 function isDateHeader(value: string): boolean {
@@ -103,7 +120,6 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
       if (isDateHeader(v)) {
         // Try to detect / lock in a year
         if (!detectedYear && cell?.w) {
-          // If Excel stored a richer formatted date, we might get the year from cell.w
           const maybeYear = (cell.w.match(/\b(20\d{2})\b/) || [])[1];
           if (maybeYear) detectedYear = parseInt(maybeYear, 10);
         }
@@ -159,23 +175,47 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
   return shifts;
 }
 
-type ShiftGroup = {
-  date: string;
-  shifts: Shift[];
-};
+// ---------- Contact helpers ----------
+
+function formatPreference(contact?: Contact): string {
+  if (!contact) return "No contact info";
+  switch (contact.preferred) {
+    case "email":
+      return "Prefers email";
+    case "sms":
+      return "Prefers SMS";
+    case "either":
+      return "Email or SMS";
+    case "none":
+      if (!contact.email && !contact.phone) return "Prefers not to share";
+      return "Prefers not to share";
+    default:
+      return "No preference set";
+  }
+}
+
+// ---------- Component ----------
 
 export default function MarketplaceXlsxPage() {
-  // ---- identity + contact state ----
+  // Doctor list from /api/schedule (like Same-Day mode)
   const [doctorList, setDoctorList] = useState<string[]>([]);
   const [doctorLoadError, setDoctorLoadError] = useState<string | null>(null);
   const [selectedDoctor, setSelectedDoctor] = useState("");
-  const [manualDoctor, setManualDoctor] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
 
-  const effectiveDoctorName = (selectedDoctor || manualDoctor).trim();
+  // Trade Fishing contact info (local only)
+  const [contactDraft, setContactDraft] = useState<Contact>({
+    email: "",
+    phone: "",
+    preferred: "none",
+  });
+  const [contactSavedMessage, setContactSavedMessage] = useState("");
 
-  // Load doctor list from /api/schedule (same source as Same-Day mode)
+  // XLSX parsing state
+  const [shifts, setShifts] = useState<Shift[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // ----- Load doctor list from /api/schedule -----
   useEffect(() => {
     async function loadDoctors() {
       try {
@@ -196,7 +236,7 @@ export default function MarketplaceXlsxPage() {
       } catch (err) {
         console.error(err);
         setDoctorLoadError(
-          "Could not load doctor list from the schedule. You can still type your name manually."
+          "Could not load doctor list from the schedule. You can still upload a file and use the parser."
         );
       }
     }
@@ -204,11 +244,40 @@ export default function MarketplaceXlsxPage() {
     loadDoctors();
   }, []);
 
-  // ---- XLSX parsing state ----
-  const [shifts, setShifts] = useState<Shift[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  // ----- Load saved Trade Fishing contact from localStorage -----
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(TF_CONTACT_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Contact;
+      setContactDraft(parsed);
+    } catch {
+      // ignore
+    }
+  }, []);
 
+  // ----- Save contact info locally -----
+  const handleSaveContact = () => {
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(
+          TF_CONTACT_STORAGE_KEY,
+          JSON.stringify(contactDraft)
+        );
+      }
+      setContactSavedMessage("Contact information saved on this device.");
+    } catch {
+      setContactSavedMessage(
+        "There was a problem saving contact info locally."
+      );
+    }
+    setTimeout(() => setContactSavedMessage(""), 3000);
+  };
+
+  const myPreferenceText = formatPreference(contactDraft);
+
+  // ----- XLSX file handling -----
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -234,7 +303,7 @@ export default function MarketplaceXlsxPage() {
     }
   };
 
-  // ---- derive: future-only, sorted & grouped by date ----
+  // ----- Derive: future-only, sorted & grouped by date -----
   const groupedFutureShifts: ShiftGroup[] = useMemo(() => {
     if (!shifts.length) return [];
 
@@ -255,9 +324,9 @@ export default function MarketplaceXlsxPage() {
       map.get(s.date)!.push(s);
     }
 
-    return Array.from(map.entries()).map(([date, shifts]) => ({
+    return Array.from(map.entries()).map(([date, groupShifts]) => ({
       date,
-      shifts,
+      shifts: groupShifts,
     }));
   }, [shifts]);
 
@@ -266,120 +335,216 @@ export default function MarketplaceXlsxPage() {
     0
   );
 
+  // ---------- Render ----------
+
   return (
     <main style={{ maxWidth: 1000, margin: "0 auto", padding: "1rem" }}>
-      <h1>Metri-Manager – Trade Fishing (Prototype)</h1>
-      <p>
-        Upload a MetricAid{" "}
-        <code>.xlsx</code> export (the one that includes your own schedule +
-        marketplace). This prototype parses the marketplace shifts, showing{" "}
-        <strong>future</strong> shifts grouped by date. Next step will be the
+      <h1>Metri-Manager – Trade Fishing (Marketplace XLSX)</h1>
+      <p style={{ marginBottom: "1rem" }}>
+        Upload a MetricAid <code>.xlsx</code> export (the one that includes your
+        own schedule + marketplace). This prototype parses the shifts and shows{" "}
+        <strong>future days</strong> grouped by date. The next step will be the
         actual &quot;find good trades&quot; logic.
       </p>
 
-      {/* 1. Pick your name */}
+      {/* ---- 1. Pick your name (Same-Day style) ---- */}
       <section
         style={{
-          border: "1px solid #ddd",
-          borderRadius: 8,
+          border: "1px solid #ccc",
           padding: "1rem",
+          borderRadius: "0.5rem",
           marginBottom: "1rem",
         }}
       >
         <h2>1. Pick your name</h2>
+        <p>
+          For now this is mainly to keep the UI consistent with Same-Day
+          Trades. Later Trade Fishing logic will use your name to avoid
+          suggesting trades with yourself.
+        </p>
 
         {doctorLoadError && (
-          <p style={{ color: "red", marginBottom: "0.5rem" }}>
-            {doctorLoadError}
-          </p>
+          <p style={{ color: "red" }}>{doctorLoadError}</p>
         )}
 
+        <h3>Pick your name from the schedule</h3>
+        {doctorList.length === 0 && !doctorLoadError && <p>Loading…</p>}
         {doctorList.length > 0 && (
-          <div style={{ marginBottom: "0.75rem" }}>
-            <label style={{ display: "block", marginBottom: "0.25rem" }}>
-              Choose from schedule list:
-            </label>
-            <select
-              value={selectedDoctor}
-              onChange={(e) => setSelectedDoctor(e.target.value)}
-              style={{ width: "100%", maxWidth: 400, padding: "0.4rem" }}
-            >
-              <option value="">-- Select your name --</option>
-              {doctorList.map((doc) => (
-                <option key={doc} value={doc}>
-                  {doc}
-                </option>
-              ))}
-            </select>
-          </div>
+          <select
+            value={selectedDoctor}
+            onChange={(e) => setSelectedDoctor(e.target.value)}
+            style={{ width: "100%", padding: "0.5rem", maxWidth: 400 }}
+          >
+            <option value="">-- Choose your name --</option>
+            {doctorList.map((doc) => (
+              <option key={doc} value={doc}>
+                {doc}
+              </option>
+            ))}
+          </select>
         )}
-
-        <div style={{ marginBottom: "0.75rem" }}>
-          <label style={{ display: "block", marginBottom: "0.25rem" }}>
-            Or type your last name:
-          </label>
-          <input
-            type="text"
-            value={manualDoctor}
-            onChange={(e) => setManualDoctor(e.target.value)}
-            placeholder="Your last name (e.g. Klassen)"
-            style={{ width: "100%", maxWidth: 400, padding: "0.4rem" }}
-          />
-        </div>
-
-        <p style={{ fontSize: "0.85rem", color: "#555" }}>
-          Current name:{" "}
-          <strong>{effectiveDoctorName || "(none selected yet)"}</strong>
-        </p>
       </section>
 
-      {/* 2. Optional contact info */}
+      {/* ---- 2. Contact registration (Same-Day style, local only) ---- */}
       <section
         style={{
-          border: "1px solid #ddd",
-          borderRadius: 8,
+          border: "1px solid #ccc",
           padding: "1rem",
+          borderRadius: "0.5rem",
           marginBottom: "1rem",
         }}
       >
-        <h2>2. Optional contact info</h2>
+        <h2>2. Optional contact info (Trade Fishing)</h2>
         <p style={{ fontSize: "0.9rem", color: "#555" }}>
-          This is just for your own reference while you&apos;re fishing for
-          trades (for example, to copy-paste into emails or texts). We&apos;re
-          not yet saving this to the shared contacts list.
+          This looks like the Same-Day contact block, but right now it only
+          saves to <strong>this device</strong> for Trade Fishing use. We are
+          not yet syncing this with the shared contacts table.
         </p>
+
+        <p>
+          You are editing contact info for:{" "}
+          <strong>
+            {selectedDoctor ? `Dr. ${selectedDoctor}` : "no doctor selected"}
+          </strong>
+        </p>
+        <p style={{ fontSize: "0.9rem", color: "#555" }}>
+          Your current preference: <strong>{myPreferenceText}</strong>
+        </p>
+
         <div style={{ marginBottom: "0.5rem" }}>
-          <label style={{ display: "block", marginBottom: "0.25rem" }}>
-            Email:
+          <label>
+            Email:&nbsp;
+            <input
+              type="email"
+              value={contactDraft.email}
+              onChange={(e) =>
+                setContactDraft((c) => ({
+                  ...c,
+                  email: e.target.value,
+                }))
+              }
+              style={{ width: "100%", maxWidth: 400 }}
+              placeholder="you@example.com"
+            />
           </label>
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-            style={{ width: "100%", maxWidth: 400, padding: "0.4rem" }}
-          />
         </div>
         <div style={{ marginBottom: "0.5rem" }}>
-          <label style={{ display: "block", marginBottom: "0.25rem" }}>
-            Phone:
+          <label>
+            Phone (optional):&nbsp;
+            <input
+              type="tel"
+              value={contactDraft.phone}
+              onChange={(e) =>
+                setContactDraft((c) => ({
+                  ...c,
+                  phone: e.target.value,
+                }))
+              }
+              style={{ width: "100%", maxWidth: 400 }}
+              placeholder="+1-204-555-1234"
+            />
           </label>
-          <input
-            type="tel"
-            value={phone}
-            onChange={(e) => setPhone(e.target.value)}
-            placeholder="+1-204-555-1234"
-            style={{ width: "100%", maxWidth: 400, padding: "0.4rem" }}
-          />
         </div>
+        <div style={{ marginBottom: "0.5rem" }}>
+          <span>Preferred notification method:&nbsp;</span>
+          <label>
+            <input
+              type="radio"
+              name="tfPreferred"
+              value="email"
+              checked={contactDraft.preferred === "email"}
+              onChange={() =>
+                setContactDraft((c) => ({
+                  ...c,
+                  preferred: "email",
+                }))
+              }
+            />
+            &nbsp;Email
+          </label>
+          &nbsp;&nbsp;
+          <label>
+            <input
+              type="radio"
+              name="tfPreferred"
+              value="sms"
+              checked={contactDraft.preferred === "sms"}
+              onChange={() =>
+                setContactDraft((c) => ({
+                  ...c,
+                  preferred: "sms",
+                }))
+              }
+            />
+            &nbsp;SMS
+          </label>
+          &nbsp;&nbsp;
+          <label>
+            <input
+              type="radio"
+              name="tfPreferred"
+              value="either"
+              checked={contactDraft.preferred === "either"}
+              onChange={() =>
+                setContactDraft((c) => ({
+                  ...c,
+                  preferred: "either",
+                }))
+              }
+            />
+            &nbsp;Either
+          </label>
+          &nbsp;&nbsp;
+          <label>
+            <input
+              type="radio"
+              name="tfPreferred"
+              value="none"
+              checked={contactDraft.preferred === "none"}
+              onChange={() =>
+                setContactDraft((c) => ({
+                  ...c,
+                  preferred: "none",
+                }))
+              }
+            />
+            &nbsp;I prefer not to share
+          </label>
+        </div>
+        <button
+          type="button"
+          onClick={handleSaveContact}
+          style={{
+            padding: "0.4rem 0.8rem",
+            marginBottom: "0.5rem",
+          }}
+        >
+          Save contact info
+        </button>
+        {contactSavedMessage && (
+          <div
+            style={{
+              color: "green",
+              marginBottom: "0.5rem",
+            }}
+          >
+            {contactSavedMessage}
+          </div>
+        )}
+        <p style={{ fontSize: "0.9rem", color: "#555" }}>
+          By entering my email and/or phone number and clicking Save, I consent
+          to this site storing my contact information{" "}
+          <strong>on this device</strong> so I can use it while fishing for
+          trades.
+        </p>
       </section>
 
-      {/* 3. Upload XLSX */}
+      {/* ---- 3. Upload XLSX ---- */}
       <section
         style={{
-          border: "1px solid #ddd",
-          borderRadius: 8,
+          border: "1px solid #ccc",
           padding: "1rem",
+          borderRadius: "0.5rem",
           marginBottom: "1rem",
         }}
       >
@@ -397,7 +562,7 @@ export default function MarketplaceXlsxPage() {
         {error && <p style={{ color: "red" }}>{error}</p>}
       </section>
 
-      {/* Parsed output */}
+      {/* ---- Parsed output ---- */}
       {groupedFutureShifts.length > 0 && (
         <>
           <p>
