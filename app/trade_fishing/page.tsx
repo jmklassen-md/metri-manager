@@ -406,138 +406,169 @@ export default function MarketplaceXlsxPage() {
           <strong>
             {selectedDoctor ? `Dr. ${selectedDoctor}` : "no doctor selected"}
           </strong>
-        </p>
-        <p style={{ fontSize: "0.9rem", color: "#555" }}>
-          Your current preference: <strong>{myPreferenceText}</strong>
-        </p>
+        </p><section
+  style={{
+    border: "1px solid #ccc",
+    padding: "1rem",
+    borderRadius: "0.5rem",
+    marginBottom: "1rem",
+  }}
+>
+  <h2>2. Optional contact info (Trade Fishing)</h2>
 
-        <div style={{ marginBottom: "0.5rem" }}>
-          <label>
-            Email:&nbsp;
-            <input
-              type="email"
-              value={contactDraft.email}
-              onChange={(e) =>
-                setContactDraft((c) => ({
-                  ...c,
-                  email: e.target.value,
-                }))
-              }
-              style={{ width: "100%", maxWidth: 400 }}
-              placeholder="you@example.com"
-            />
-          </label>
-        </div>
-        <div style={{ marginBottom: "0.5rem" }}>
-          <label>
-            Phone (optional):&nbsp;
-            <input
-              type="tel"
-              value={contactDraft.phone}
-              onChange={(e) =>
-                setContactDraft((c) => ({
-                  ...c,
-                  phone: e.target.value,
-                }))
-              }
-              style={{ width: "100%", maxWidth: 400 }}
-              placeholder="+1-204-555-1234"
-            />
-          </label>
-        </div>
-        <div style={{ marginBottom: "0.5rem" }}>
-          <span>Preferred notification method:&nbsp;</span>
-          <label>
-            <input
-              type="radio"
-              name="tfPreferred"
-              value="email"
-              checked={contactDraft.preferred === "email"}
-              onChange={() =>
-                setContactDraft((c) => ({
-                  ...c,
-                  preferred: "email",
-                }))
-              }
-            />
-            &nbsp;Email
-          </label>
-          &nbsp;&nbsp;
-          <label>
-            <input
-              type="radio"
-              name="tfPreferred"
-              value="sms"
-              checked={contactDraft.preferred === "sms"}
-              onChange={() =>
-                setContactDraft((c) => ({
-                  ...c,
-                  preferred: "sms",
-                }))
-              }
-            />
-            &nbsp;SMS
-          </label>
-          &nbsp;&nbsp;
-          <label>
-            <input
-              type="radio"
-              name="tfPreferred"
-              value="either"
-              checked={contactDraft.preferred === "either"}
-              onChange={() =>
-                setContactDraft((c) => ({
-                  ...c,
-                  preferred: "either",
-                }))
-              }
-            />
-            &nbsp;Either
-          </label>
-          &nbsp;&nbsp;
-          <label>
-            <input
-              type="radio"
-              name="tfPreferred"
-              value="none"
-              checked={contactDraft.preferred === "none"}
-              onChange={() =>
-                setContactDraft((c) => ({
-                  ...c,
-                  preferred: "none",
-                }))
-              }
-            />
-            &nbsp;I prefer not to share
-          </label>
-        </div>
-        <button
-          type="button"
-          onClick={handleSaveContact}
+  {!selectedDoctor && (
+    <p style={{ fontSize: "0.9rem", color: "#555" }}>
+      Pick your name in step 1 first. Once you&apos;ve chosen your name,
+      you&apos;ll be able to save optional email / phone details for Trade
+      Fishing.
+    </p>
+  )}
+
+  {selectedDoctor && (
+    <>
+      <p style={{ fontSize: "0.9rem", color: "#555" }}>
+        This looks like the Same-Day contact block, but right now it only
+        saves to <strong>this device</strong> for Trade Fishing use. We are
+        not yet syncing this with the shared contacts table.
+      </p>
+
+      <p>
+        You are editing contact info for:{" "}
+        <strong>Dr. {selectedDoctor}</strong>
+      </p>
+      <p style={{ fontSize: "0.9rem", color: "#555" }}>
+        Your current preference: <strong>{myPreferenceText}</strong>
+      </p>
+
+      <div style={{ marginBottom: "0.5rem" }}>
+        <label>
+          Email:&nbsp;
+          <input
+            type="email"
+            value={contactDraft.email}
+            onChange={(e) =>
+              setContactDraft((c) => ({
+                ...c,
+                email: e.target.value,
+              }))
+            }
+            style={{ width: "100%", maxWidth: 400 }}
+            placeholder="you@example.com"
+          />
+        </label>
+      </div>
+      <div style={{ marginBottom: "0.5rem" }}>
+        <label>
+          Phone (optional):&nbsp;
+          <input
+            type="tel"
+            value={contactDraft.phone}
+            onChange={(e) =>
+              setContactDraft((c) => ({
+                ...c,
+                phone: e.target.value,
+              }))
+            }
+            style={{ width: "100%", maxWidth: 400 }}
+            placeholder="+1-204-555-1234"
+          />
+        </label>
+      </div>
+      <div style={{ marginBottom: "0.5rem" }}>
+        <span>Preferred notification method:&nbsp;</span>
+        <label>
+          <input
+            type="radio"
+            name="tfPreferred"
+            value="email"
+            checked={contactDraft.preferred === "email"}
+            onChange={() =>
+              setContactDraft((c) => ({
+                ...c,
+                preferred: "email",
+              }))
+            }
+          />
+          &nbsp;Email
+        </label>
+        &nbsp;&nbsp;
+        <label>
+          <input
+            type="radio"
+            name="tfPreferred"
+            value="sms"
+            checked={contactDraft.preferred === "sms"}
+            onChange={() =>
+              setContactDraft((c) => ({
+                ...c,
+                preferred: "sms",
+              }))
+            }
+          />
+          &nbsp;SMS
+        </label>
+        &nbsp;&nbsp;
+        <label>
+          <input
+            type="radio"
+            name="tfPreferred"
+            value="either"
+            checked={contactDraft.preferred === "either"}
+            onChange={() =>
+              setContactDraft((c) => ({
+                ...c,
+                preferred: "either",
+              }))
+            }
+          />
+          &nbsp;Either
+        </label>
+        &nbsp;&nbsp;
+        <label>
+          <input
+            type="radio"
+            name="tfPreferred"
+            value="none"
+            checked={contactDraft.preferred === "none"}
+            onChange={() =>
+              setContactDraft((c) => ({
+                ...c,
+                preferred: "none",
+              }))
+            }
+          />
+          &nbsp;I prefer not to share
+        </label>
+      </div>
+      <button
+        type="button"
+        onClick={handleSaveContact}
+        style={{
+          padding: "0.4rem 0.8rem",
+          marginBottom: "0.5rem",
+        }}
+      >
+        Save contact info
+      </button>
+      {contactSavedMessage && (
+        <div
           style={{
-            padding: "0.4rem 0.8rem",
+            color: "green",
             marginBottom: "0.5rem",
           }}
         >
-          Save contact info
-        </button>
-        {contactSavedMessage && (
-          <div
-            style={{
-              color: "green",
-              marginBottom: "0.5rem",
-            }}
-          >
-            {contactSavedMessage}
-          </div>
-        )}
-        <p style={{ fontSize: "0.9rem", color: "#555" }}>
-          By entering my email and/or phone number and clicking Save, I consent
-          to this site storing my contact information{" "}
-          <strong>on this device</strong> so I can use it while fishing for
-          trades.
-        </p>
-      </section>
+          {contactSavedMessage}
+        </div>
+      )}
+      <p style={{ fontSize: "0.9rem", color: "#555" }}>
+        By entering my email and/or phone number and clicking Save, I consent
+        to this site storing my contact information{" "}
+        <strong>on this device</strong> so I can use it while fishing for
+        trades.
+      </p>
+    </>
+  )}
+</section>
 
       {/* ---- 3. Upload XLSX ---- */}
       <section
