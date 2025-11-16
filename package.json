@@ -9,18 +9,20 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@types/xlsx": "^0.0.35",
     "next": "14.2.5",
+    "pdfjs-dist": "^4.0.0",
+    "pg": "^8.12.0",
     "react": "18.2.0",
     "react-dom": "18.2.0",
-    "pg": "^8.12.0",
-    "pdfjs-dist": "^4.0.0"
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
-    "typescript": "^5.5.0",
     "eslint": "8.57.0",
-    "eslint-config-next": "14.2.5"
+    "eslint-config-next": "14.2.5",
+    "typescript": "^5.5.0"
   }
 }
