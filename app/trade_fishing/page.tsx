@@ -6,12 +6,12 @@ import * as XLSX from "xlsx";
 // ---------- Types ----------
 
 type Shift = {
-  date: string;       // "2025-11-17"
-  shiftName: string;  // "R5", "Surge-AM", etc.
-  startTime: string;  // "05:00"
-  endTime: string;    // "09:00"
-  doctor: string;     // e.g. "Klassen"
-  rawCell: string;    // original text for debugging
+  date: string;      // "2025-11-17"
+  shiftName: string; // "R-AM1", "Surge-AM", etc.
+  startTime: string; // "08:00"
+  endTime: string;   // "17:00"
+  doctor: string;    // e.g. "Klassen"
+  rawCell: string;   // original text for debugging
 };
 
 type Contact = {
@@ -20,35 +20,25 @@ type Contact = {
   preferred: "email" | "sms" | "either" | "none";
 };
 
-type ContactApiRow = {
-  doctorName: string;
-  email: string | null;
-  phone: string | null;
-  preferred: string | null;
-};
-
-type GroupedDay = {
-  date: string;
-  shifts: Shift[];
-};
-
 type TradeCandidate = {
   candidate: Shift;
+  similarityScore: number;
+  similarityLabel: string;
   myShort: boolean;
   theirShort: boolean;
+  hasShort: boolean;
 };
 
-const CONTACTS_STORAGE_KEY = "metriManagerContacts";
+const CONTACTS_STORAGE_KEY = "metriManagerContactsTradeFishing";
 
-// ---------- Helpers ----------
+// ---------- Basic helpers ----------
 
-/** Parse "Mon, Nov 17" style headers */
 function isDateHeader(value: string): boolean {
   return /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun),/.test(value.trim());
 }
 
-/** Convert "Mon, Nov 17" to "YYYY-MM-DD" (guessing a year if needed) */
 function normalizeDate(header: string, fallbackYear?: number): string | null {
+  // Example header: "Mon, Nov 17"
   const parts = header.replace(",", "").split(/\s+/); // ["Mon", "Nov", "17"]
   if (parts.length < 3) return null;
 
@@ -81,16 +71,67 @@ function normalizeDate(header: string, fallbackYear?: number): string | null {
   return d.toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
-/** Extract doctor last name-ish from the "names" row */
 function extractDoctorName(text: string): string {
   const trimmed = text.trim();
   if (trimmed === "" || trimmed === "--") return "";
 
+  // e.g. "KlassenMa (FRCP R3) / Luo (M3)" -> "Klassen"
   const match = trimmed.match(/[A-Za-z]+/);
   return match ? match[0] : trimmed;
 }
 
-/** Human-readable "Mon, Nov 17, 2025" style */
+function toDateTime(date: string, time: string): Date {
+  return new Date(`${date}T${time || "00:00"}:00`);
+}
+
+function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
+  const start = toDateTime(shift.date, shift.startTime);
+  let end = toDateTime(shift.date, shift.endTime);
+
+  // Overnight (23:00–09:00 etc.)
+  if (end <= start) {
+    end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
+  }
+
+  return { start, end };
+}
+
+function hoursDiff(later: Date, earlier: Date) {
+  return (later.getTime() - earlier.getTime()) / (1000 * 60 * 60);
+}
+
+function dateDiffDays(a: string, b: string): number {
+  const da = new Date(a + "T00:00:00");
+  const db = new Date(b + "T00:00:00");
+  const ms = da.getTime() - db.getTime();
+  return Math.round(ms / (1000 * 60 * 60 * 24));
+}
+
+function isWeekend(dateStr: string): boolean {
+  const d = new Date(dateStr + "T00:00:00");
+  const day = d.getDay(); // 0 = Sun, 6 = Sat
+  return day === 0 || day === 6;
+}
+
+function timeOfDayBucket(time: string): "early" | "day" | "evening" | "night" {
+  const [hStr] = time.split(":");
+  const h = parseInt(hStr || "0", 10);
+  if (h >= 5 && h < 12) return "early";   // 05–11
+  if (h >= 12 && h < 17) return "day";    // 12–16
+  if (h >= 17 && h < 22) return "evening"; // 17–21
+  return "night";                          // 22–04
+}
+
+function bucketDistance(
+  a: "early" | "day" | "evening" | "night",
+  b: "early" | "day" | "evening" | "night"
+): number {
+  const order = ["early", "day", "evening", "night"] as const;
+  const ia = order.indexOf(a);
+  const ib = order.indexOf(b);
+  return Math.abs(ia - ib);
+}
+
 function formatHumanDate(dateStr: string): string {
   const d = new Date(dateStr + "T00:00:00");
   return d.toLocaleDateString(undefined, {
@@ -101,7 +142,6 @@ function formatHumanDate(dateStr: string): string {
   });
 }
 
-/** Contact preference display */
 function formatPreference(contact?: Contact): string {
   if (!contact) return "No contact info";
   switch (contact.preferred) {
@@ -119,38 +159,12 @@ function formatPreference(contact?: Contact): string {
   }
 }
 
-/** Time helpers for shift comparison */
-
-function toDateTime(date: string, time: string): Date {
-  return new Date(`${date}T${time || "00:00"}:00`);
+function shiftsOverlap(a: Shift, b: Shift): boolean {
+  const { start: sa, end: ea } = getShiftDateTimes(a);
+  const { start: sb, end: eb } = getShiftDateTimes(b);
+  return sa < eb && sb < ea;
 }
 
-function getShiftDateTimes(shift: Shift): { start: Date; end: Date } {
-  const start = toDateTime(shift.date, shift.startTime);
-  let end = toDateTime(shift.date, shift.endTime);
-
-  // Overnight (e.g. 23:00–09:00, 22:00–02:00)
-  if (end <= start) {
-    end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
-  }
-
-  return { start, end };
-}
-
-function hoursDiff(later: Date, earlier: Date) {
-  return (later.getTime() - earlier.getTime()) / (1000 * 60 * 60);
-}
-
-function overlapsInterval(
-  aStart: Date,
-  aEnd: Date,
-  bStart: Date,
-  bEnd: Date
-): boolean {
-  return aStart < bEnd && aEnd > bStart;
-}
-
-/** Previous shift end helper (by doctor) */
 function findPreviousShiftEnd(
   allShifts: Shift[],
   doctor: string,
@@ -172,7 +186,68 @@ function findPreviousShiftEnd(
   return ends[0];
 }
 
-/** Parse the MetricAid XLSX export into a list of shifts */
+// ---------- Similarity scoring ----------
+
+function computeSimilarity(myShift: Shift, candidate: Shift): {
+  score: number;
+  label: string;
+} {
+  let score = 0;
+  const reasons: string[] = [];
+
+  const myName = (myShift.shiftName || "").trim().toLowerCase();
+  const candName = (candidate.shiftName || "").trim().toLowerCase();
+
+  if (myName && candName && myName === candName) {
+    score += 50;
+    reasons.push("Exact match: same shift name");
+  }
+
+  const myBucket = timeOfDayBucket(myShift.startTime);
+  const candBucket = timeOfDayBucket(candidate.startTime);
+  const bDist = bucketDistance(myBucket, candBucket);
+
+  if (bDist === 0) {
+    score += 20;
+    reasons.push("Same time-of-day");
+  } else if (bDist === 1) {
+    score += 10;
+    reasons.push("Similar time-of-day");
+  }
+
+  const dayDiff = Math.abs(dateDiffDays(myShift.date, candidate.date));
+  if (dayDiff === 0) {
+    score += 30;
+    reasons.push("Same day");
+  } else if (dayDiff <= 1) {
+    score += 25;
+    reasons.push("Within 1 day");
+  } else if (dayDiff <= 3) {
+    score += 20;
+    reasons.push("Within 3 days");
+  } else if (dayDiff <= 7) {
+    score += 10;
+    reasons.push("Within 1 week");
+  }
+
+  // Weekend vs weekday bump
+  const myWeekend = isWeekend(myShift.date);
+  const candWeekend = isWeekend(candidate.date);
+  if (myWeekend === candWeekend) {
+    score += 10;
+    reasons.push(myWeekend ? "Both weekend shifts" : "Both weekday shifts");
+  }
+
+  const label =
+    reasons.length > 0
+      ? `${reasons.join(" | ")} (score ${score})`
+      : `Different type/offset (score ${score})`;
+
+  return { score, label };
+}
+
+// ---------- XLSX parsing ----------
+
 function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
   const workbook = XLSX.read(arrayBuffer, { type: "array" });
   const sheetName = workbook.SheetNames[0];
@@ -183,14 +258,13 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
 
   const range = XLSX.utils.decode_range(ref);
 
-  // Track active date per column (7 columns = days)
   const datesByCol: (string | null)[] = new Array(range.e.c + 1).fill(null);
-
   const shifts: Shift[] = [];
+
   let detectedYear: number | undefined;
 
   for (let r = range.s.r; r <= range.e.r; r++) {
-    // Pass 1: detect date headers
+    // First pass: detect / update date headers
     for (let c = range.s.c; c <= range.e.c; c++) {
       const cellAddr = XLSX.utils.encode_cell({ r, c });
       const cell = sheet[cellAddr];
@@ -202,7 +276,6 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
           const maybeYear = (cell.w.match(/\b(20\d{2})\b/) || [])[1];
           if (maybeYear) detectedYear = parseInt(maybeYear, 10);
         }
-
         const normalized = normalizeDate(v, detectedYear);
         if (normalized) {
           datesByCol[c] = normalized;
@@ -210,7 +283,7 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
       }
     }
 
-    // Pass 2: shift cells
+    // Second pass: look for shift cells
     for (let c = range.s.c; c <= range.e.c; c++) {
       const cellAddr = XLSX.utils.encode_cell({ r, c });
       const cell = sheet[cellAddr];
@@ -232,7 +305,6 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
       const startTime = m[2].padStart(5, "0");
       const endTime = m[3].padStart(5, "0");
 
-      // Name row is next row in same column
       const docCellAddr = XLSX.utils.encode_cell({ r: r + 1, c });
       const docCell = sheet[docCellAddr];
       const docText = typeof docCell?.v === "string" ? docCell.v : "";
@@ -254,19 +326,15 @@ function parseMarketplaceXlsx(arrayBuffer: ArrayBuffer): Shift[] {
 
 // ---------- Component ----------
 
-export default function TradeFishingPage() {
-  // ICS schedule for whole group
-  const [scheduleShifts, setScheduleShifts] = useState<Shift[]>([]);
-  const [scheduleError, setScheduleError] = useState<string | null>(null);
-
-  // Contacts
-  const [contacts, setContacts] = useState<Record<string, Contact>>({});
-  const [contactsLoaded, setContactsLoaded] = useState(false);
-
-  // User identity
+export default function MarketplaceXlsxPage() {
   const [selectedDoctor, setSelectedDoctor] = useState("");
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [shifts, setShifts] = useState<Shift[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  // Contact editing
+  // Contacts (local-only for now)
+  const [contacts, setContacts] = useState<Record<string, Contact>>({});
   const [contactDraft, setContactDraft] = useState<Contact>({
     email: "",
     phone: "",
@@ -274,117 +342,36 @@ export default function TradeFishingPage() {
   });
   const [contactSavedMessage, setContactSavedMessage] = useState("");
 
-  // Which of *my* shifts am I trying to get rid of?
-  const [selectedMyShiftIndex, setSelectedMyShiftIndex] = useState("");
-
-  // Marketplace XLSX
-  const [marketplaceShifts, setMarketplaceShifts] = useState<Shift[]>([]);
-  const [xlsxError, setXlsxError] = useState<string | null>(null);
-  const [xlsxLoading, setXlsxLoading] = useState(false);
-  const [uploadedFileName, setUploadedFileName] = useState("");
-
-  // ---------- Load schedule from /api/schedule ----------
-
-  useEffect(() => {
-    fetch("/api/schedule")
-      .then((r) => r.json())
-      .then((data) => {
-        if (!Array.isArray(data)) {
-          setScheduleError("Could not load schedule.");
-          return;
-        }
-        const mapped: Shift[] = data.map((s: any) => ({
-          date: s.date,
-          shiftName: s.shiftName,
-          startTime: s.startTime,
-          endTime: s.endTime,
-          doctor: s.doctor,
-          rawCell: s.raw ?? "",
-        }));
-        setScheduleShifts(mapped);
-      })
-      .catch(() => setScheduleError("Could not load schedule."));
-  }, []);
-
-  // Doctors list from schedule
-  const doctorsFromSchedule = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          scheduleShifts
-            .map((s) => (s.doctor || "").trim())
-            .filter((n) => n.length > 0)
-        )
-      ).sort((a, b) => a.localeCompare(b)),
-    [scheduleShifts]
-  );
-
-  // ---------- Contacts load (DB + localStorage) ----------
-
-  useEffect(() => {
-    async function loadContacts() {
-      try {
-        const res = await fetch("/api/contacts");
-        if (!res.ok) throw new Error("Failed to fetch contacts");
-        const rows = (await res.json()) as ContactApiRow[];
-
-        const fromDb: Record<string, Contact> = {};
-        for (const row of rows) {
-          fromDb[row.doctorName] = {
-            email: row.email || "",
-            phone: row.phone || "",
-            preferred: (row.preferred as Contact["preferred"]) ?? "none",
-          };
-        }
-
-        let fromLocal: Record<string, Contact> = {};
-        try {
-          const raw =
-            typeof window !== "undefined"
-              ? window.localStorage.getItem(CONTACTS_STORAGE_KEY)
-              : null;
-          fromLocal = raw ? (JSON.parse(raw) as Record<string, Contact>) : {};
-        } catch {
-          fromLocal = {};
-        }
-
-        setContacts({ ...fromDb, ...fromLocal });
-      } catch {
-        try {
-          const raw =
-            typeof window !== "undefined"
-              ? window.localStorage.getItem(CONTACTS_STORAGE_KEY)
-              : null;
-          const stored = raw ? (JSON.parse(raw) as Record<string, Contact>) : {};
-          setContacts(stored);
-        } catch {
-          setContacts({});
-        }
-      } finally {
-        setContactsLoaded(true);
-      }
-    }
-
-    loadContacts();
-  }, []);
-
+  // Load contacts from localStorage once
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      const toStore = JSON.stringify(contacts);
-      window.localStorage.setItem(CONTACTS_STORAGE_KEY, toStore);
+      const raw = window.localStorage.getItem(CONTACTS_STORAGE_KEY);
+      const stored = raw ? (JSON.parse(raw) as Record<string, Contact>) : {};
+      setContacts(stored);
+    } catch {
+      setContacts({});
+    }
+  }, []);
+
+  // Persist contacts to localStorage when they change
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        CONTACTS_STORAGE_KEY,
+        JSON.stringify(contacts)
+      );
     } catch {
       // ignore
     }
   }, [contacts]);
 
-  // ---------- Selected doctor -> contactDraft ----------
-
+  // Update contactDraft when selectedDoctor changes
   useEffect(() => {
     setContactSavedMessage("");
     if (!selectedDoctor) {
       setContactDraft({ email: "", phone: "", preferred: "none" });
-      setSelectedMyShiftIndex("");
       return;
     }
     const existing = contacts[selectedDoctor];
@@ -395,6 +382,20 @@ export default function TradeFishingPage() {
     });
   }, [selectedDoctor, contacts]);
 
+  const handleSaveContact = () => {
+    if (!selectedDoctor) return;
+    setContacts((prev) => ({
+      ...prev,
+      [selectedDoctor]: {
+        email: contactDraft.email.trim(),
+        phone: contactDraft.phone.trim(),
+        preferred: contactDraft.preferred,
+      },
+    }));
+    setContactSavedMessage("Contact information saved on this device.");
+    setTimeout(() => setContactSavedMessage(""), 3000);
+  };
+
   const myContact: Contact | undefined =
     selectedDoctor && contacts[selectedDoctor]
       ? contacts[selectedDoctor]
@@ -404,50 +405,69 @@ export default function TradeFishingPage() {
     ? formatPreference(myContact)
     : "No contact info saved for you yet.";
 
-  const handleSaveContact = async () => {
-    if (!selectedDoctor) return;
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-    const payload: Contact = {
-      email: contactDraft.email.trim(),
-      phone: contactDraft.phone.trim(),
-      preferred: contactDraft.preferred,
-    };
-
-    setContacts((prev) => ({
-      ...prev,
-      [selectedDoctor]: payload,
-    }));
+    setError(null);
+    setLoading(true);
+    setShifts([]);
+    setFileName(file.name);
 
     try {
-      await fetch("/api/contacts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          doctorName: selectedDoctor,
-          email: payload.email,
-          phone: payload.phone,
-          preferred: payload.preferred,
-        }),
-      });
-      setContactSavedMessage("Contact information saved.");
-    } catch {
-      setContactSavedMessage(
-        "Saved locally, but there was an error syncing with the server."
-      );
-    }
+      const buffer = await file.arrayBuffer();
+      const parsed = parseMarketplaceXlsx(buffer);
 
-    setTimeout(() => setContactSavedMessage(""), 3000);
+      // Sort raw shifts by date + startTime
+      parsed.sort((a, b) => {
+        const d = a.date.localeCompare(b.date);
+        if (d !== 0) return d;
+        return a.startTime.localeCompare(b.startTime);
+      });
+
+      setShifts(parsed);
+
+      if (parsed.length === 0) {
+        setError(
+          "Parsed 0 shifts from this file. The layout might be different than expected."
+        );
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Failed to read XLSX – check console for details.");
+    } finally {
+      setLoading(false);
+    }
   };
 
-  // ---------- My future shifts (for "shift to get rid of") ----------
+  const doctors = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          shifts
+            .map((s) => (s.doctor || "").trim())
+            .filter((n) => n.length > 0)
+        )
+      ).sort((a, b) => a.localeCompare(b)),
+    [shifts]
+  );
+
+  // ---------- My future shifts (from XLSX) ----------
+
+  const [selectedMyShiftIndex, setSelectedMyShiftIndex] = useState("");
+
+  useEffect(() => {
+    // Reset selected shift if doctor changes or file changes
+    setSelectedMyShiftIndex("");
+  }, [selectedDoctor, fileName]);
 
   const myFutureShifts = useMemo(() => {
-    if (!selectedDoctor) return [];
+    if (!selectedDoctor) return [] as { s: Shift; index: number }[];
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    return scheduleShifts
+    return shifts
       .map((s, index) => ({ s, index }))
       .filter(({ s }) => {
         const docMatches =
@@ -458,211 +478,147 @@ export default function TradeFishingPage() {
         const d = new Date(s.date + "T00:00:00");
         return d >= today;
       })
-      .sort((a, b) =>
-        `${a.s.date} ${a.s.startTime}`.localeCompare(
-          `${b.s.date} ${b.s.startTime}`
-        )
-      );
-  }, [selectedDoctor, scheduleShifts]);
+      .sort((a, b) => {
+        const d = a.s.date.localeCompare(b.s.date);
+        if (d !== 0) return d;
+        return a.s.startTime.localeCompare(b.s.startTime);
+      });
+  }, [shifts, selectedDoctor]);
 
   const myShift: Shift | null =
     selectedMyShiftIndex === ""
       ? null
-      : scheduleShifts[parseInt(selectedMyShiftIndex, 10)] ?? null;
+      : shifts[parseInt(selectedMyShiftIndex, 10)] ?? null;
 
-  // ---------- XLSX upload & parse ----------
+  // ---------- Trade candidates ----------
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setXlsxError(null);
-    setXlsxLoading(true);
-    setMarketplaceShifts([]);
-    setUploadedFileName(file.name);
-
-    try {
-      const buffer = await file.arrayBuffer();
-      const parsed = parseMarketplaceXlsx(buffer);
-      setMarketplaceShifts(parsed);
-      if (parsed.length === 0) {
-        setXlsxError(
-          "Parsed 0 shifts from this file. The layout might be different than expected."
-        );
-      }
-    } catch (err: any) {
-      console.error(err);
-      setXlsxError("Failed to read XLSX – check console for details.");
-    } finally {
-      setXlsxLoading(false);
-    }
-  };
-
-  // ---------- Tradeable marketplace shifts (base filter) ----------
-
-  const tradeableShifts = useMemo(() => {
-    if (marketplaceShifts.length === 0) return [];
+  const tradeCandidates: TradeCandidate[] = useMemo(() => {
+    if (!myShift || !selectedDoctor) return [];
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const nameLower = selectedDoctor.trim().toLowerCase();
-
-    return marketplaceShifts.filter((s) => {
-      const d = new Date(s.date + "T00:00:00");
-      if (d < today) return false;
-
-      const docTrimmed = (s.doctor || "").trim();
-      if (!docTrimmed) return false; // no doctor, not tradeable
-
-      if (nameLower) {
-        const docLower = docTrimmed.toLowerCase();
-        if (docLower === nameLower) return false; // it's me
-      }
-
-      return true;
-    });
-  }, [marketplaceShifts, selectedDoctor]);
-
-  // ---------- Grouped view for debugging / overview ----------
-
-  const groupedDays: GroupedDay[] = useMemo(() => {
-    if (!tradeableShifts.length) return [];
-
-    const byDate: Record<string, Shift[]> = {};
-    for (const s of tradeableShifts) {
-      if (!byDate[s.date]) byDate[s.date] = [];
-      byDate[s.date].push(s);
-    }
-
-    const result: GroupedDay[] = Object.entries(byDate).map(
-      ([date, shifts]) => ({
-        date,
-        shifts: shifts.sort((a, b) =>
-          (a.startTime || "").localeCompare(b.startTime || "")
-        ),
-      })
+    const myOtherShifts = shifts.filter(
+      (s) =>
+        (s.doctor || "").trim().toLowerCase() ===
+          selectedDoctor.trim().toLowerCase() && s !== myShift
     );
-
-    result.sort((a, b) => a.date.localeCompare(b.date));
-    return result;
-  }, [tradeableShifts]);
-
-  // ---------- Trade candidates: compare myShift vs marketplace ----------
-
-  const tradeCandidates: TradeCandidate[] = useMemo(() => {
-    if (!myShift || !tradeableShifts.length) return [];
-
-    const { start: myStart, end: myEnd } = getShiftDateTimes(myShift);
-    const meLower = (myShift.doctor || "").trim().toLowerCase();
-
-    // All of *my* future shifts from schedule (for overlap checks)
-    const myAllFutureShifts = scheduleShifts.filter((s) => {
-      const docMatches =
-        (s.doctor || "").trim().toLowerCase() === meLower;
-      if (!docMatches) return false;
-      const d = new Date(s.date + "T00:00:00");
-      return d >= new Date(myShift.date + "T00:00:00");
-    });
 
     const candidates: TradeCandidate[] = [];
 
-    for (const candidate of tradeableShifts) {
-      const { start: candStart, end: candEnd } = getShiftDateTimes(candidate);
+    for (const s of shifts) {
+      if (s === myShift) continue;
 
-      // 1) If I take candidate, I drop myShift.
-      // Check: does candidate overlap with any of my OTHER shifts?
-      const overlapsMe = myAllFutureShifts.some((s) => {
-        if (s === myShift) return false; // I'm dropping this one
-        const { start, end } = getShiftDateTimes(s);
-        return overlapsInterval(candStart, candEnd, start, end);
-      });
-      if (overlapsMe) {
-        continue; // discard this candidate
+      const doc = (s.doctor || "").trim();
+      if (!doc) continue; // no doctor -> not tradable
+      if (doc.toLowerCase() === selectedDoctor.trim().toLowerCase())
+        continue; // can't trade with yourself
+
+      const d = new Date(s.date + "T00:00:00");
+      if (d < today) continue; // only future
+
+      // Remove options where user is already working an overlapping shift
+      let overlapsMe = false;
+      for (const mine of myOtherShifts) {
+        if (shiftsOverlap(s, mine)) {
+          overlapsMe = true;
+          break;
+        }
+      }
+      if (overlapsMe) continue;
+
+      // Short-turnaround checks (similar to Same-Day mode)
+      const { start: candStart } = getShiftDateTimes(s);
+      const { start: myStart } = getShiftDateTimes(myShift);
+
+      let myShort = false;
+      let theirShort = false;
+
+      // Scenario A: YOU take THEIR shift – ignore your original myShift
+      const myPrev = findPreviousShiftEnd(shifts, selectedDoctor, candStart, [
+        myShift,
+      ]);
+      if (myPrev) {
+        const gap = hoursDiff(candStart, myPrev);
+        if (gap < 12) myShort = true;
       }
 
-      // 2) Short-turnaround checks
+      // Scenario B: THEY take YOUR shift – ignore their original candidate shift
+      const theirPrev = findPreviousShiftEnd(shifts, doc, myStart, [s]);
+      if (theirPrev) {
+        const gap = hoursDiff(myStart, theirPrev);
+        if (gap < 12) theirShort = true;
+      }
 
-      // For ME taking THEIR shift:
-      const myPrevEnd = findPreviousShiftEnd(
-        scheduleShifts,
-        myShift.doctor,
-        candStart,
-        [myShift]
-      );
-      const myShort =
-        myPrevEnd !== null && hoursDiff(candStart, myPrevEnd) < 12;
+      const hasShort = myShort || theirShort;
 
-      // For THEM taking MY shift:
-      const theirPrevEnd = findPreviousShiftEnd(
-        scheduleShifts,
-        candidate.doctor,
-        myStart,
-        [candidate]
-      );
-      const theirShort =
-        theirPrevEnd !== null && hoursDiff(myStart, theirPrevEnd) < 12;
+      const { score, label } = computeSimilarity(myShift, s);
 
-      candidates.push({ candidate, myShort, theirShort });
+      candidates.push({
+        candidate: s,
+        similarityScore: score,
+        similarityLabel: label,
+        myShort,
+        theirShort,
+        hasShort,
+      });
     }
 
-    // Simple sort: by candidate date/time
-    candidates.sort((a, b) =>
-      `${a.candidate.date} ${a.candidate.startTime}`.localeCompare(
-        `${b.candidate.date} ${b.candidate.startTime}`
-      )
-    );
+    // Sort:
+    // 1) Non–short-turnaround trades first
+    // 2) Higher similarity score
+    // 3) Earlier date, then earlier start time
+    candidates.sort((a, b) => {
+      if (a.hasShort !== b.hasShort) {
+        return a.hasShort ? 1 : -1; // false (0) first
+      }
+      if (b.similarityScore !== a.similarityScore) {
+        return b.similarityScore - a.similarityScore; // higher score first
+      }
+      const d = a.candidate.date.localeCompare(b.candidate.date);
+      if (d !== 0) return d;
+      return a.candidate.startTime.localeCompare(b.candidate.startTime);
+    });
 
     return candidates;
-  }, [myShift, tradeableShifts, scheduleShifts]);
+  }, [myShift, selectedDoctor, shifts]);
 
   // ---------- Render ----------
 
   return (
     <main style={{ maxWidth: 1000, margin: "0 auto", padding: "1rem" }}>
-      <h1>Trade Fishing (Prototype)</h1>
+      <h1>Trade Fishing (Marketplace Prototype)</h1>
       <p style={{ marginBottom: "0.75rem" }}>
-        Tell me <strong>who you are</strong>, which shift you want to{" "}
-        <strong>get rid of</strong>, and upload a MetricAid marketplace{" "}
-        <code>.xlsx</code>. I’ll show you{" "}
-        <strong>future trade candidates</strong> that don’t overlap your
-        schedule and flag short-turnaround risks for either side.
+        Upload your MetricAid <code>.xlsx</code> export (the one that includes
+        your own schedule + marketplace). Then pick{" "}
+        <strong>your name</strong> and the shift you&apos;re trying to get rid
+        of. I&apos;ll suggest marketplace shifts that are good trade targets,
+        filter out overlaps, and flag short-turnaround risks.
       </p>
 
-      {scheduleError && (
-        <p style={{ color: "red", marginBottom: "0.75rem" }}>
-          {scheduleError}
-        </p>
-      )}
-
-      {/* 1. Pick your name + contact info */}
+      {/* Step 1: Choose your name */}
       <section
         style={{
           border: "1px solid #ddd",
-          borderRadius: 8,
-          padding: "1rem",
+          padding: "0.75rem",
+          borderRadius: "0.5rem",
           marginBottom: "1rem",
         }}
       >
         <h2 style={{ marginTop: 0 }}>1. Pick your name</h2>
-        <p style={{ fontSize: "0.9rem", color: "#555" }}>
-          This is used to{" "}
-          <strong>identify which shifts are yours</strong> when we look at the
-          marketplace.
-        </p>
-
-        {doctorsFromSchedule.length === 0 && !scheduleError && (
-          <p>Loading doctor list from your schedule…</p>
+        {doctors.length === 0 && (
+          <p style={{ fontSize: "0.9rem", color: "#555" }}>
+            Upload an <code>.xlsx</code> file first to see the doctor list.
+          </p>
         )}
-
-        {doctorsFromSchedule.length > 0 && (
+        {doctors.length > 0 && (
           <select
             value={selectedDoctor}
             onChange={(e) => setSelectedDoctor(e.target.value)}
-            style={{ width: "100%", padding: "0.5rem" }}
+            style={{ width: "100%", padding: "0.5rem", marginBottom: "0.75rem" }}
           >
             <option value="">-- Choose your name --</option>
-            {doctorsFromSchedule.map((doc) => (
+            {doctors.map((doc) => (
               <option key={doc} value={doc}>
                 {doc}
               </option>
@@ -670,411 +626,267 @@ export default function TradeFishingPage() {
           </select>
         )}
 
+        {/* Contact registration (optional, local only) */}
         {selectedDoctor && (
           <>
-            <hr style={{ margin: "1rem 0" }} />
-            <h3>Contact registration for Trade Fishing</h3>
-            {!contactsLoaded && <p>Loading contact preferences…</p>}
-            {contactsLoaded && (
-              <>
-                <p>
-                  You are editing contact info for:{" "}
-                  <strong>Dr. {selectedDoctor}</strong>
-                </p>
-                <p style={{ fontSize: "0.9rem", color: "#555" }}>
-                  Your current preference:{" "}
-                  <strong>{myPreferenceText}</strong>
-                </p>
-                <div style={{ marginBottom: "0.5rem" }}>
-                  <label>
-                    Email:&nbsp;
-                    <input
-                      type="email"
-                      value={contactDraft.email}
-                      onChange={(e) =>
-                        setContactDraft((c) => ({
-                          ...c,
-                          email: e.target.value,
-                        }))
-                      }
-                      style={{ width: "100%", maxWidth: 400 }}
-                      placeholder="you@example.com"
-                    />
-                  </label>
-                </div>
-                <div style={{ marginBottom: "0.5rem" }}>
-                  <label>
-                    Phone (optional):&nbsp;
-                    <input
-                      type="tel"
-                      value={contactDraft.phone}
-                      onChange={(e) =>
-                        setContactDraft((c) => ({
-                          ...c,
-                          phone: e.target.value,
-                        }))
-                      }
-                      style={{ width: "100%", maxWidth: 400 }}
-                      placeholder="+1-204-555-1234"
-                    />
-                  </label>
-                </div>
-                <div style={{ marginBottom: "0.5rem" }}>
-                  <span>Preferred notification method:&nbsp;</span>
-                  <label>
-                    <input
-                      type="radio"
-                      name="preferred"
-                      value="email"
-                      checked={contactDraft.preferred === "email"}
-                      onChange={() =>
-                        setContactDraft((c) => ({
-                          ...c,
-                          preferred: "email",
-                        }))
-                      }
-                    />
-                    &nbsp;Email
-                  </label>
-                  &nbsp;&nbsp;
-                  <label>
-                    <input
-                      type="radio"
-                      name="preferred"
-                      value="sms"
-                      checked={contactDraft.preferred === "sms"}
-                      onChange={() =>
-                        setContactDraft((c) => ({
-                          ...c,
-                          preferred: "sms",
-                        }))
-                      }
-                    />
-                    &nbsp;SMS
-                  </label>
-                  &nbsp;&nbsp;
-                  <label>
-                    <input
-                      type="radio"
-                      name="preferred"
-                      value="either"
-                      checked={contactDraft.preferred === "either"}
-                      onChange={() =>
-                        setContactDraft((c) => ({
-                          ...c,
-                          preferred: "either",
-                        }))
-                      }
-                    />
-                    &nbsp;Either
-                  </label>
-                  &nbsp;&nbsp;
-                  <label>
-                    <input
-                      type="radio"
-                      name="preferred"
-                      value="none"
-                      checked={contactDraft.preferred === "none"}
-                      onChange={() =>
-                        setContactDraft((c) => ({
-                          ...c,
-                          preferred: "none",
-                        }))
-                      }
-                    />
-                    &nbsp;I prefer not to share
-                  </label>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleSaveContact}
-                  style={{
-                    padding: "0.4rem 0.8rem",
-                    marginBottom: "0.5rem",
-                  }}
-                >
-                  Save contact info
-                </button>
-                {contactSavedMessage && (
-                  <div
-                    style={{
-                      color: "green",
-                      marginBottom: "0.5rem",
-                    }}
-                  >
-                    {contactSavedMessage}
-                  </div>
-                )}
-                <p style={{ fontSize: "0.9rem", color: "#555" }}>
-                  By entering my email and/or phone number and clicking Save, I
-                  consent to this site storing my contact information so I can
-                  use it while fishing for trades.
-                </p>
-              </>
-            )}
-          </>
-        )}
-      </section>
-
-      {/* 2. Pick your shift to give away */}
-      <section
-        style={{
-          border: "1px solid #ddd",
-          borderRadius: 8,
-          padding: "1rem",
-          marginBottom: "1rem",
-        }}
-      >
-        <h2 style={{ marginTop: 0 }}>2. Pick the shift you want to trade away</h2>
-        {!selectedDoctor && (
-          <p>Select your name above to see your future shifts.</p>
-        )}
-
-        {selectedDoctor && myFutureShifts.length === 0 && (
-          <p>No future shifts found for Dr. {selectedDoctor}.</p>
-        )}
-
-        {selectedDoctor && myFutureShifts.length > 0 && (
-          <>
+            <h3>Contact info for Trade Fishing (optional)</h3>
             <p style={{ fontSize: "0.9rem", color: "#555" }}>
-              These are your <strong>future</strong> shifts from the ICS
-              schedule.
+              You are editing contact info for:{" "}
+              <strong>Dr. {selectedDoctor}</strong>
             </p>
-            <select
-              value={selectedMyShiftIndex}
-              onChange={(e) => setSelectedMyShiftIndex(e.target.value)}
-              style={{ width: "100%", padding: "0.5rem" }}
+            <p style={{ fontSize: "0.9rem", color: "#555" }}>
+              Your current preference: <strong>{myPreferenceText}</strong>
+            </p>
+            <div style={{ marginBottom: "0.5rem" }}>
+              <label>
+                Email:&nbsp;
+                <input
+                  type="email"
+                  value={contactDraft.email}
+                  onChange={(e) =>
+                    setContactDraft((c) => ({ ...c, email: e.target.value }))
+                  }
+                  style={{ width: "100%", maxWidth: 400 }}
+                  placeholder="you@example.com"
+                />
+              </label>
+            </div>
+            <div style={{ marginBottom: "0.5rem" }}>
+              <label>
+                Phone (optional):&nbsp;
+                <input
+                  type="tel"
+                  value={contactDraft.phone}
+                  onChange={(e) =>
+                    setContactDraft((c) => ({ ...c, phone: e.target.value }))
+                  }
+                  style={{ width: "100%", maxWidth: 400 }}
+                  placeholder="+1-204-555-1234"
+                />
+              </label>
+            </div>
+            <div style={{ marginBottom: "0.5rem" }}>
+              <span>Preferred notification method:&nbsp;</span>
+              <label>
+                <input
+                  type="radio"
+                  name="preferred-tf"
+                  value="email"
+                  checked={contactDraft.preferred === "email"}
+                  onChange={() =>
+                    setContactDraft((c) => ({ ...c, preferred: "email" }))
+                  }
+                />
+                &nbsp;Email
+              </label>
+              &nbsp;&nbsp;
+              <label>
+                <input
+                  type="radio"
+                  name="preferred-tf"
+                  value="sms"
+                  checked={contactDraft.preferred === "sms"}
+                  onChange={() =>
+                    setContactDraft((c) => ({ ...c, preferred: "sms" }))
+                  }
+                />
+                &nbsp;SMS
+              </label>
+              &nbsp;&nbsp;
+              <label>
+                <input
+                  type="radio"
+                  name="preferred-tf"
+                  value="either"
+                  checked={contactDraft.preferred === "either"}
+                  onChange={() =>
+                    setContactDraft((c) => ({ ...c, preferred: "either" }))
+                  }
+                />
+                &nbsp;Either
+              </label>
+              &nbsp;&nbsp;
+              <label>
+                <input
+                  type="radio"
+                  name="preferred-tf"
+                  value="none"
+                  checked={contactDraft.preferred === "none"}
+                  onChange={() =>
+                    setContactDraft((c) => ({ ...c, preferred: "none" }))
+                  }
+                />
+                &nbsp;I prefer not to share
+              </label>
+            </div>
+            <button
+              type="button"
+              onClick={handleSaveContact}
+              style={{ padding: "0.4rem 0.8rem", marginBottom: "0.5rem" }}
             >
-              <option value="">-- Choose a shift --</option>
-              {myFutureShifts.map(({ s, index }) => {
-                const label = `${formatHumanDate(
-                  s.date
-                )}, ${s.shiftName} ${s.startTime}–${s.endTime}`;
-                return (
-                  <option key={index} value={index}>
-                    {label}
-                  </option>
-                );
-              })}
-            </select>
-
-            {myShift && (
-              <p style={{ marginTop: "0.5rem", fontSize: "0.9rem" }}>
-                <strong>Your chosen shift:</strong>{" "}
-                {formatHumanDate(myShift.date)} – {myShift.shiftName} (
-                {myShift.startTime}–{myShift.endTime})
-              </p>
+              Save contact info
+            </button>
+            {contactSavedMessage && (
+              <div style={{ color: "green", marginBottom: "0.5rem" }}>
+                {contactSavedMessage}
+              </div>
             )}
+            <p style={{ fontSize: "0.8rem", color: "#555" }}>
+              By entering my email and/or phone number and clicking Save, I
+              consent to this site storing my contact information on this
+              device so I can use it while fishing for trades.
+            </p>
           </>
         )}
       </section>
 
-      {/* 3. Upload XLSX */}
+      {/* Step 2: Upload XLSX */}
       <section
         style={{
           border: "1px solid #ddd",
-          borderRadius: 8,
-          padding: "1rem",
+          padding: "0.75rem",
+          borderRadius: "0.5rem",
           marginBottom: "1rem",
         }}
       >
-        <h2 style={{ marginTop: 0 }}>3. Upload your marketplace .xlsx</h2>
-        <p style={{ fontSize: "0.9rem", color: "#555" }}>
-          Export the <strong>MetricAid marketplace</strong> as{" "}
-          <code>.xlsx</code> (with your schedule included) and upload it here.
-          It usually feels best to <strong>choose your name</strong> and your{" "}
-          <strong>shift to trade</strong> first, then upload.
-        </p>
-
-        <div style={{ margin: "0.75rem 0" }}>
+        <h2 style={{ marginTop: 0 }}>2. Upload your MetricAid .xlsx</h2>
+        <div style={{ margin: "0.5rem 0" }}>
           <input type="file" accept=".xlsx,.xls" onChange={handleFileChange} />
         </div>
-
-        {uploadedFileName && (
-          <p style={{ fontSize: "0.85rem", color: "#555" }}>
-            File: <code>{uploadedFileName}</code>
+        {fileName && (
+          <p style={{ fontSize: "0.9rem", color: "#555" }}>
+            Loaded file: <strong>{fileName}</strong>
           </p>
         )}
-
-        {xlsxLoading && <p>Reading and parsing XLSX…</p>}
-        {xlsxError && <p style={{ color: "red" }}>{xlsxError}</p>}
+        {loading && <p>Reading and parsing XLSX…</p>}
+        {error && <p style={{ color: "red" }}>{error}</p>}
+        {shifts.length > 0 && !error && (
+          <p style={{ fontSize: "0.9rem", color: "#555" }}>
+            Parsed <strong>{shifts.length}</strong> total shifts (including your
+            own + marketplace).
+          </p>
+        )}
       </section>
 
-      {/* 4. Trade candidates */}
+      {/* Step 3: Pick the shift you're trying to give away */}
       <section
         style={{
           border: "1px solid #ddd",
-          borderRadius: 8,
-          padding: "1rem",
+          padding: "0.75rem",
+          borderRadius: "0.5rem",
           marginBottom: "1rem",
         }}
       >
-        <h2 style={{ marginTop: 0 }}>4. Suggested trade targets</h2>
+        <h2 style={{ marginTop: 0 }}>3. Pick the shift you&apos;re fishing with</h2>
+        {!selectedDoctor && (
+          <p style={{ fontSize: "0.9rem", color: "#555" }}>
+            Choose your name in step 1 first.
+          </p>
+        )}
+        {selectedDoctor && myFutureShifts.length === 0 && (
+          <p style={{ fontSize: "0.9rem", color: "#555" }}>
+            No future shifts found for {selectedDoctor} in this file.
+          </p>
+        )}
+        {selectedDoctor && myFutureShifts.length > 0 && (
+          <select
+            value={selectedMyShiftIndex}
+            onChange={(e) => setSelectedMyShiftIndex(e.target.value)}
+            style={{ width: "100%", padding: "0.5rem" }}
+          >
+            <option value="">-- Choose one of your future shifts --</option>
+            {myFutureShifts.map(({ s, index }) => {
+              const label = `${formatHumanDate(
+                s.date
+              )}, ${s.shiftName} ${s.startTime}–${s.endTime}`;
+              return (
+                <option key={index} value={index}>
+                  {label}
+                </option>
+              );
+            })}
+          </select>
+        )}
+      </section>
+
+      {/* Step 4: Trade Fishing results */}
+      <section
+        style={{
+          border: "1px solid #ddd",
+          padding: "0.75rem",
+          borderRadius: "0.5rem",
+        }}
+      >
+        <h2 style={{ marginTop: 0 }}>4. Trade Fishing results</h2>
 
         {!myShift && (
-          <p>
-            Pick your name and the shift you want to trade away above to see
-            suggestions here.
+          <p style={{ fontSize: "0.9rem", color: "#555" }}>
+            Select one of your future shifts above to see trade suggestions.
           </p>
         )}
 
-        {myShift && marketplaceShifts.length === 0 && !xlsxLoading && !xlsxError && (
-          <p>Upload a marketplace <code>.xlsx</code> to see trade options.</p>
-        )}
-
-        {myShift && tradeableShifts.length > 0 && tradeCandidates.length === 0 && (
-          <p>
-            Parsed <strong>{tradeableShifts.length}</strong> future marketplace
-            shifts, but none are suitable after removing overlapping shifts and
-            your own shifts.
-          </p>
-        )}
-
-        {myShift && tradeCandidates.length > 0 && (
+        {myShift && (
           <>
-            <p style={{ fontSize: "0.9rem", color: "#555" }}>
-              Found <strong>{tradeCandidates.length}</strong> potential trade
-              candidates. Overlapping shifts for you have already been removed.
+            <p style={{ fontSize: "0.9rem", marginBottom: "0.5rem" }}>
+              <strong>Your chosen shift:</strong>{" "}
+              {formatHumanDate(myShift.date)} – {myShift.shiftName}{" "}
+              {myShift.startTime}–{myShift.endTime}
             </p>
-            <div style={{ overflowX: "auto" }}>
-              <table
-                border={1}
-                cellPadding={4}
-                style={{ borderCollapse: "collapse", minWidth: 750 }}
-              >
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Shift</th>
-                    <th>Start</th>
-                    <th>End</th>
-                    <th>Doctor</th>
-                    <th>Turnaround risk</th>
-                    <th>Raw cell text</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tradeCandidates.map((t, i) => {
-                    const { candidate, myShort, theirShort } = t;
-                    let riskText = "OK (≥ 12h for both)";
-                    let riskColor = "#16a34a";
 
-                    if (myShort || theirShort) {
-                      riskColor = "#dc2626";
-                      riskText = "SHORT TURNAROUND ";
-                      if (myShort) riskText += "(for YOU) ";
-                      if (theirShort) riskText += "(for THEM)";
-                    }
+            {tradeCandidates.length === 0 && (
+              <p style={{ fontSize: "0.9rem", color: "#555" }}>
+                No suitable marketplace shifts found (after removing overlaps and
+                filtering for future dates).
+              </p>
+            )}
 
-                    return (
+            {tradeCandidates.length > 0 && (
+              <div style={{ overflowX: "auto", maxHeight: 500, overflowY: "auto" }}>
+                <table
+                  border={1}
+                  cellPadding={4}
+                  style={{ borderCollapse: "collapse", minWidth: 800 }}
+                >
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Shift</th>
+                      <th>Times</th>
+                      <th>Doctor</th>
+                      <th>Match quality</th>
+                      <th>Turnaround risk</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tradeCandidates.map((t, i) => (
                       <tr key={i}>
-                        <td>{formatHumanDate(candidate.date)}</td>
-                        <td>{candidate.shiftName}</td>
-                        <td>{candidate.startTime}</td>
-                        <td>{candidate.endTime}</td>
-                        <td>{candidate.doctor}</td>
-                        <td style={{ color: riskColor }}>{riskText}</td>
+                        <td>{formatHumanDate(t.candidate.date)}</td>
+                        <td>{t.candidate.shiftName}</td>
                         <td>
-                          <pre
-                            style={{
-                              margin: 0,
-                              whiteSpace: "pre-wrap",
-                              fontSize: "0.75rem",
-                            }}
-                          >
-                            {candidate.rawCell}
-                          </pre>
+                          {t.candidate.startTime}–{t.candidate.endTime}
+                        </td>
+                        <td>{t.candidate.doctor}</td>
+                        <td style={{ fontSize: "0.8rem" }}>
+                          {t.similarityLabel}
+                        </td>
+                        <td
+                          style={{
+                            color: t.hasShort ? "red" : "green",
+                            fontSize: "0.85rem",
+                          }}
+                        >
+                          {t.hasShort
+                            ? `SHORT TURNAROUND ${
+                                t.myShort ? "(for YOU) " : ""
+                              }${t.theirShort ? "(for THEM)" : ""}`
+                            : "OK (≥ 12h each)"}
                         </td>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-      </section>
-
-      {/* Extra: grouped marketplace view for sanity check */}
-      <section
-        style={{
-          border: "1px solid #ddd",
-          borderRadius: 8,
-          padding: "1rem",
-          marginBottom: "1rem",
-        }}
-      >
-        <h2 style={{ marginTop: 0 }}>Marketplace overview (filtered)</h2>
-        {!tradeableShifts.length && marketplaceShifts.length > 0 && (
-          <p>
-            Parsed <strong>{marketplaceShifts.length}</strong> shifts, but none
-            are future tradeable shifts after basic filtering (no doctor name,
-            your own shifts, past dates).
-          </p>
-        )}
-
-        {tradeableShifts.length > 0 && groupedDays.length > 0 && (
-          <>
-            <p style={{ fontSize: "0.9rem", color: "#555" }}>
-              Future marketplace shifts with{" "}
-              <strong>no empty doctor names</strong> and excluding any shifts
-              belonging to{" "}
-              {selectedDoctor ? `Dr. ${selectedDoctor}` : "the selected user"}.
-            </p>
-            <div style={{ maxHeight: 400, overflowY: "auto" }}>
-              {groupedDays.map((day) => (
-                <div
-                  key={day.date}
-                  style={{
-                    borderTop: "1px solid #eee",
-                    paddingTop: "0.5rem",
-                    marginTop: "0.5rem",
-                  }}
-                >
-                  <strong>{formatHumanDate(day.date)}</strong>
-                  <table
-                    border={1}
-                    cellPadding={4}
-                    style={{
-                      borderCollapse: "collapse",
-                      marginTop: "0.35rem",
-                      minWidth: 650,
-                    }}
-                  >
-                    <thead>
-                      <tr>
-                        <th>Shift</th>
-                        <th>Start</th>
-                        <th>End</th>
-                        <th>Doctor</th>
-                        <th style={{ width: "45%" }}>Raw cell text</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {day.shifts.map((s, idx) => (
-                        <tr key={idx}>
-                          <td>{s.shiftName}</td>
-                          <td>{s.startTime}</td>
-                          <td>{s.endTime}</td>
-                          <td>{s.doctor}</td>
-                          <td>
-                            <pre
-                              style={{
-                                margin: 0,
-                                whiteSpace: "pre-wrap",
-                                fontSize: "0.75rem",
-                              }}
-                            >
-                              {s.rawCell}
-                            </pre>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ))}
-            </div>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </>
         )}
       </section>
