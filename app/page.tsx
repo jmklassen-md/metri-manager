@@ -1131,6 +1131,7 @@ ${contactLine}
           onClick={() => setMode("periHang")}
           style={{
             padding: "0.5rem 1rem",
+            marginRight: "0.5rem",
             borderRadius: "999px",
             border: "1px solid #333",
             background: mode === "periHang" ? "#1d4ed8" : "#fff",
@@ -1138,6 +1139,24 @@ ${contactLine}
           }}
         >
           Peri-Shift Hang
+        </button>
+        {/* New: Trade Fishing button that links to its own page */}
+        <button
+          type="button"
+          onClick={() => {
+            if (typeof window !== "undefined") {
+              window.location.href = "/trade_fishing";
+            }
+          }}
+          style={{
+            padding: "0.5rem 1rem",
+            borderRadius: "999px",
+            border: "1px solid #333",
+            background: "#fff",
+            color: "#000",
+          }}
+        >
+          Trade Fishing (Marketplace)
         </button>
       </div>
 
