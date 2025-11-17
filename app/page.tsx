@@ -294,16 +294,19 @@ export default function Page() {
     loadContacts();
   }, []);
 
-  // Persist contacts to localStorage whenever they change
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const toStore = JSON.stringify(contacts);
-      window.localStorage.setItem(CONTACTS_STORAGE_KEY, toStore);
-    } catch {
-      // ignore
-    }
-  }, [contacts]);
+    // Persist contacts to localStorage whenever they change,
+      // but only AFTER we've finished the initial load/merge.
+        useEffect(() => {
+          if (typeof window === "undefined") return;
+          if (!contactsLoaded) return; // <-- key line
+
+          try {
+            const toStore = JSON.stringify(contacts);
+            window.localStorage.setItem(CONTACTS_STORAGE_KEY, toStore);
+          } catch {
+            // ignore
+          }
+  }, [contacts, contactsLoaded]);
 
   // ---------- Doctors list ----------
 
