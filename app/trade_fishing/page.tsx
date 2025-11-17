@@ -978,4 +978,4 @@ export default function TradeFishingPage() {
       </section>
     </main>
   );
-}
+} 
