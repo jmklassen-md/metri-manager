@@ -8,7 +8,7 @@ type Shift = {
   date: string; // "2025-11-17"
   shiftName: string;
   startTime: string; // "08:00"
-  endTime: string;   // "17:00"
+  endTime: string; // "17:00"
   doctor: string;
   location?: string;
   raw?: string;
@@ -109,10 +109,7 @@ function formatPreference(contact?: Contact): string {
 
 // ---------- Peri-Shift classification ----------
 
-function classifyPeriSuggestion(
-  start: Date,
-  end: Date
-): PeriSuggestion | null {
+function classifyPeriSuggestion(start: Date, end: Date): PeriSuggestion | null {
   const endHour = end.getHours();
   const startHour = start.getHours();
 
@@ -220,7 +217,7 @@ export default function Page() {
       .catch(() => setError("Could not load schedule."));
   }, []);
 
-  // ---------- Load contacts (DB + localStorage fallback) ----------
+  // ---------- Load contacts (DB + localStorage fallback, with cleanup) ----------
 
   useEffect(() => {
     async function loadContacts() {
@@ -232,7 +229,11 @@ export default function Page() {
 
         const fromDb: Record<string, Contact> = {};
         for (const row of rows) {
-          fromDb[row.doctorName] = {
+          const name = row.doctorName?.trim();
+          // Ignore bad / empty / "undefined" names from DB
+          if (!name || name.toLowerCase() === "undefined") continue;
+
+          fromDb[name] = {
             email: row.email || "",
             phone: row.phone || "",
             preferred: (row.preferred as Contact["preferred"]) ?? "none",
@@ -246,21 +247,42 @@ export default function Page() {
             typeof window !== "undefined"
               ? window.localStorage.getItem(CONTACTS_STORAGE_KEY)
               : null;
-          fromLocal = raw ? (JSON.parse(raw) as Record<string, Contact>) : {};
+          const parsed = raw
+            ? (JSON.parse(raw) as Record<string, Contact>)
+            : {};
+
+          // Clean out any "undefined" or empty keys from localStorage
+          const cleaned: Record<string, Contact> = {};
+          for (const [name, contact] of Object.entries(parsed)) {
+            const trimmed = name.trim();
+            if (!trimmed || trimmed.toLowerCase() === "undefined") continue;
+            cleaned[trimmed] = contact;
+          }
+          fromLocal = cleaned;
         } catch {
           fromLocal = {};
         }
 
         setContacts({ ...SEED_CONTACTS, ...fromDb, ...fromLocal });
       } catch {
-        // If API fails, fall back to localStorage + seeds
+        // If API fails, fall back to localStorage + seeds (with cleanup)
         try {
           const raw =
             typeof window !== "undefined"
               ? window.localStorage.getItem(CONTACTS_STORAGE_KEY)
               : null;
-          const stored = raw ? (JSON.parse(raw) as Record<string, Contact>) : {};
-          setContacts({ ...SEED_CONTACTS, ...stored });
+          const parsed = raw
+            ? (JSON.parse(raw) as Record<string, Contact>)
+            : {};
+
+          const cleaned: Record<string, Contact> = {};
+          for (const [name, contact] of Object.entries(parsed)) {
+            const trimmed = name.trim();
+            if (!trimmed || trimmed.toLowerCase() === "undefined") continue;
+            cleaned[trimmed] = contact;
+          }
+
+          setContacts({ ...SEED_CONTACTS, ...cleaned });
         } catch {
           setContacts({ ...SEED_CONTACTS });
         }
@@ -553,7 +575,15 @@ ${contactLine}
 
   // Save contact info for selected doctor (DB + localStorage)
   const handleSaveContact = async () => {
-    if (!selectedDoctor) return;
+    const name = selectedDoctor.trim();
+
+    // Extra safety: don't allow saving under empty or "undefined"
+    if (!name || name.toLowerCase() === "undefined") {
+      alert(
+        "Please choose your name from the dropdown before saving contact info."
+      );
+      return;
+    }
 
     const payload: Contact = {
       email: contactDraft.email.trim(),
@@ -563,7 +593,7 @@ ${contactLine}
 
     setContacts((prev) => ({
       ...prev,
-      [selectedDoctor]: payload,
+      [name]: payload,
     }));
 
     try {
@@ -571,7 +601,7 @@ ${contactLine}
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          doctorName: selectedDoctor,
+          doctorName: name,
           email: payload.email,
           phone: payload.phone,
           preferred: payload.preferred,
@@ -1140,7 +1170,7 @@ ${contactLine}
         >
           Peri-Shift Hang
         </button>
-        {/* New: Trade Fishing button that links to its own page */}
+        {/* Trade Fishing button that links to its own page */}
         <button
           type="button"
           onClick={() => {
