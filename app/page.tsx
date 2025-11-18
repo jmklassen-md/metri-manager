@@ -8,7 +8,7 @@ type Shift = {
   date: string; // "2025-11-17"
   shiftName: string;
   startTime: string; // "08:00"
-  endTime: string; // "17:00"
+  endTime: string;   // "17:00"
   doctor: string;
   location?: string;
   raw?: string;
@@ -20,8 +20,10 @@ type Contact = {
   preferred: "email" | "sms" | "either" | "none";
 };
 
+// NOTE: backend returns `doctor_name`, so we support both shapes
 type ContactApiRow = {
-  doctorName: string;
+  doctorName?: string | null;
+  doctor_name?: string | null;
   email: string | null;
   phone: string | null;
   preferred: string | null;
@@ -109,7 +111,10 @@ function formatPreference(contact?: Contact): string {
 
 // ---------- Peri-Shift classification ----------
 
-function classifyPeriSuggestion(start: Date, end: Date): PeriSuggestion | null {
+function classifyPeriSuggestion(
+  start: Date,
+  end: Date
+): PeriSuggestion | null {
   const endHour = end.getHours();
   const startHour = start.getHours();
 
@@ -217,7 +222,7 @@ export default function Page() {
       .catch(() => setError("Could not load schedule."));
   }, []);
 
-  // ---------- Load contacts (DB + localStorage fallback, with cleanup) ----------
+  // ---------- Load contacts (DB + localStorage fallback) ----------
 
   useEffect(() => {
     async function loadContacts() {
@@ -229,11 +234,11 @@ export default function Page() {
 
         const fromDb: Record<string, Contact> = {};
         for (const row of rows) {
-          const name = row.doctorName?.trim();
-          // Ignore bad / empty / "undefined" names from DB
-          if (!name || name.toLowerCase() === "undefined") continue;
+          // Support both camelCase and snake_case
+          const nameRaw = (row.doctorName ?? row.doctor_name ?? "").trim();
+          if (!nameRaw) continue;
 
-          fromDb[name] = {
+          fromDb[nameRaw] = {
             email: row.email || "",
             phone: row.phone || "",
             preferred: (row.preferred as Contact["preferred"]) ?? "none",
@@ -247,42 +252,21 @@ export default function Page() {
             typeof window !== "undefined"
               ? window.localStorage.getItem(CONTACTS_STORAGE_KEY)
               : null;
-          const parsed = raw
-            ? (JSON.parse(raw) as Record<string, Contact>)
-            : {};
-
-          // Clean out any "undefined" or empty keys from localStorage
-          const cleaned: Record<string, Contact> = {};
-          for (const [name, contact] of Object.entries(parsed)) {
-            const trimmed = name.trim();
-            if (!trimmed || trimmed.toLowerCase() === "undefined") continue;
-            cleaned[trimmed] = contact;
-          }
-          fromLocal = cleaned;
+          fromLocal = raw ? (JSON.parse(raw) as Record<string, Contact>) : {};
         } catch {
           fromLocal = {};
         }
 
         setContacts({ ...SEED_CONTACTS, ...fromDb, ...fromLocal });
       } catch {
-        // If API fails, fall back to localStorage + seeds (with cleanup)
+        // If API fails, fall back to localStorage + seeds
         try {
           const raw =
             typeof window !== "undefined"
               ? window.localStorage.getItem(CONTACTS_STORAGE_KEY)
               : null;
-          const parsed = raw
-            ? (JSON.parse(raw) as Record<string, Contact>)
-            : {};
-
-          const cleaned: Record<string, Contact> = {};
-          for (const [name, contact] of Object.entries(parsed)) {
-            const trimmed = name.trim();
-            if (!trimmed || trimmed.toLowerCase() === "undefined") continue;
-            cleaned[trimmed] = contact;
-          }
-
-          setContacts({ ...SEED_CONTACTS, ...cleaned });
+          const stored = raw ? (JSON.parse(raw) as Record<string, Contact>) : {};
+          setContacts({ ...SEED_CONTACTS, ...stored });
         } catch {
           setContacts({ ...SEED_CONTACTS });
         }
@@ -294,19 +278,16 @@ export default function Page() {
     loadContacts();
   }, []);
 
-    // Persist contacts to localStorage whenever they change,
-      // but only AFTER we've finished the initial load/merge.
-        useEffect(() => {
-          if (typeof window === "undefined") return;
-          if (!contactsLoaded) return; // <-- key line
-
-          try {
-            const toStore = JSON.stringify(contacts);
-            window.localStorage.setItem(CONTACTS_STORAGE_KEY, toStore);
-          } catch {
-            // ignore
-          }
-  }, [contacts, contactsLoaded]);
+  // Persist contacts to localStorage whenever they change
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const toStore = JSON.stringify(contacts);
+      window.localStorage.setItem(CONTACTS_STORAGE_KEY, toStore);
+    } catch {
+      // ignore
+    }
+  }, [contacts]);
 
   // ---------- Doctors list ----------
 
@@ -578,15 +559,7 @@ ${contactLine}
 
   // Save contact info for selected doctor (DB + localStorage)
   const handleSaveContact = async () => {
-    const name = selectedDoctor.trim();
-
-    // Extra safety: don't allow saving under empty or "undefined"
-    if (!name || name.toLowerCase() === "undefined") {
-      alert(
-        "Please choose your name from the dropdown before saving contact info."
-      );
-      return;
-    }
+    if (!selectedDoctor) return;
 
     const payload: Contact = {
       email: contactDraft.email.trim(),
@@ -596,7 +569,7 @@ ${contactLine}
 
     setContacts((prev) => ({
       ...prev,
-      [name]: payload,
+      [selectedDoctor]: payload,
     }));
 
     try {
@@ -604,7 +577,7 @@ ${contactLine}
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          doctorName: name,
+          doctorName: selectedDoctor,
           email: payload.email,
           phone: payload.phone,
           preferred: payload.preferred,
@@ -1047,7 +1020,7 @@ ${contactLine}
             borderRadius: 12,
             background: "#111827",
             boxShadow: "0 10px 25px rgba(0,0,0,0.4)",
-            border: "1px solid #374151",
+            border: "1px solid "#374151",
           }}
         >
           <h1 style={{ marginBottom: "0.5rem" }}>Metri-Manager</h1>
@@ -1199,7 +1172,7 @@ ${contactLine}
       {mode === "sameDay" && (
         <section
           style={{
-            border: "1px solid #ccc",
+            border: "1px solid "#ccc",
             padding: "1rem",
             borderRadius: "0.5rem",
           }}
