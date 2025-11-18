@@ -8,7 +8,7 @@ type Shift = {
   date: string; // "2025-11-17"
   shiftName: string;
   startTime: string; // "08:00"
-  endTime: string;   // "17:00"
+  endTime: string; // "17:00"
   doctor: string;
   location?: string;
   raw?: string;
@@ -36,15 +36,27 @@ type PeriSuggestion =
   | "Wanna grab a beer?"
   | "Late lunch?";
 
+type UsageMode = "sameDay" | "getTogether" | "periHang" | "tradeFishing";
+
+type ModeUsageEvent = {
+  id: string;
+  mode: UsageMode;
+  timestamp: string;
+  doctorName?: string;
+  extra?: string;
+};
+
 const CONTACTS_STORAGE_KEY = "metriManagerContacts";
 
 const ACCESS_CODE = process.env.NEXT_PUBLIC_ACCESS_CODE?.trim() || "";
 const ACCESS_STORAGE_KEY = "metri-manager-access-ok";
 
+const USAGE_LOG_KEY = "metriManagerUsageLog";
+
 // Optional built-in seeds if you want defaults
 const SEED_CONTACTS: Record<string, Contact> = {};
 
-// ---------- Time helpers ----------
+// ---------- Helpers: time ----------
 
 function toDateTime(date: string, time: string): Date {
   return new Date(`${date}T${time || "00:00"}:00`);
@@ -90,7 +102,18 @@ function formatHumanDate(dateStr: string): string {
   });
 }
 
-// ---------- Contact helpers ----------
+// ICS datetime helper
+function formatIcsDateTime(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const ss = "00";
+  return `${y}${m}${d}T${hh}${mm}${ss}`;
+}
+
+// ---------- Helpers: contacts ----------
 
 function formatPreference(contact?: Contact): string {
   if (!contact) return "No contact info";
@@ -109,12 +132,27 @@ function formatPreference(contact?: Contact): string {
   }
 }
 
+// ---------- Helpers: usage logging ----------
+
+function makeId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function logModeUsage(event: ModeUsageEvent) {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(USAGE_LOG_KEY);
+    const arr = raw ? (JSON.parse(raw) as ModeUsageEvent[]) : [];
+    arr.push(event);
+    window.localStorage.setItem(USAGE_LOG_KEY, JSON.stringify(arr));
+  } catch {
+    // ignore
+  }
+}
+
 // ---------- Peri-Shift classification ----------
 
-function classifyPeriSuggestion(
-  start: Date,
-  end: Date
-): PeriSuggestion | null {
+function classifyPeriSuggestion(start: Date, end: Date): PeriSuggestion | null {
   const endHour = end.getHours();
   const startHour = start.getHours();
 
@@ -124,7 +162,7 @@ function classifyPeriSuggestion(
   }
 
   // Late lunch: shifts starting between 12:00 and 16:00
-  // (We prefer this over "beer" for mid-afternoon starts.)
+  // (takes priority over beer for mid-afternoon starts)
   if (startHour >= 12 && startHour < 16) {
     return "Late lunch?";
   }
@@ -135,18 +173,6 @@ function classifyPeriSuggestion(
   }
 
   return null;
-}
-
-// ---------- ICS helper ----------
-
-function formatDateTimeForIcs(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const y = d.getFullYear();
-  const m = pad(d.getMonth() + 1);
-  const day = pad(d.getDate());
-  const h = pad(d.getHours());
-  const min = pad(d.getMinutes());
-  return `${y}${m}${day}T${h}${min}00`;
 }
 
 // ---------- Main component ----------
@@ -216,6 +242,31 @@ export default function Page() {
 
   // Peri-Shift Hang state
   const [periDoctors, setPeriDoctors] = useState<string[]>([]);
+
+  // ---------- Mode change with logging ----------
+
+  const handleModeChange = (newMode: Mode) => {
+    setMode(newMode);
+    logModeUsage({
+      id: makeId(),
+      mode: newMode,
+      timestamp: new Date().toISOString(),
+      doctorName: selectedDoctor || undefined,
+    });
+  };
+
+  const handleNavToTradeFishing = () => {
+    logModeUsage({
+      id: makeId(),
+      mode: "tradeFishing",
+      timestamp: new Date().toISOString(),
+      doctorName: selectedDoctor || undefined,
+      extra: "from-main-page",
+    });
+    if (typeof window !== "undefined") {
+      window.location.href = "/trade_fishing";
+    }
+  };
 
   // ---------- Load schedule ----------
 
@@ -613,16 +664,9 @@ ${contactLine}
 
   // ---------- Get-Together logic ----------
 
-  type WarningType = "preNights" | "comingOffDays" | "postNights";
-
-  type GetTogetherWarning = {
-    type: WarningType;
-    text: string;
-  };
-
   type GetTogetherDay = {
     date: string;
-    warnings: GetTogetherWarning[];
+    warnings: string[];
   };
 
   const getTogetherDays: GetTogetherDay[] = useMemo(() => {
@@ -668,7 +712,7 @@ ${contactLine}
       const six = new Date(dStr + "T06:00:00");
 
       let blocked = false;
-      const warnings: GetTogetherWarning[] = [];
+      const warnings: string[] = [];
 
       for (const doc of groupDoctors) {
         const sameDayShiftsForDoc = relevant.filter(
@@ -681,8 +725,7 @@ ${contactLine}
         // 1) Evening conflict (17:00–22:00) on this date
         for (const s of sameDayShiftsForDoc) {
           const { start, end } = getShiftDateTimes(s);
-          const overlapsEvening =
-            start < eveningEnd && end > eveningStart;
+          const overlapsEvening = start < eveningEnd && end > eveningStart;
           const isPreNightStart = start >= preNightStart;
           // We allow pure pre-night (start ≥ 22:00) – only warn, not block.
           if (overlapsEvening && !isPreNightStart) {
@@ -698,12 +741,11 @@ ${contactLine}
           const startsLate =
             sameDate(start, thisDate) && start >= preNightStart;
           if (startsLate) {
-            warnings.push({
-              type: "preNights",
-              text: `⚠ Warning: ${doc} is pre-nights (${s.shiftName} on ${formatHumanDate(
+            warnings.push(
+              `⚠ Warning: ${doc} is pre-nights (${s.shiftName} on ${formatHumanDate(
                 s.date
-              )})`,
-            });
+              )})`
+            );
           }
         }
 
@@ -712,12 +754,11 @@ ${contactLine}
           const { start, end } = getShiftDateTimes(s);
           const overlapsDay = start < day14 && end > day10;
           if (overlapsDay) {
-            warnings.push({
-              type: "comingOffDays",
-              text: `⚠ Warning: ${doc} is coming off days (${s.shiftName} on ${formatHumanDate(
+            warnings.push(
+              `⚠ Warning: ${doc} is coming off days (${s.shiftName} on ${formatHumanDate(
                 s.date
-              )})`,
-            });
+              )})`
+            );
           }
         }
 
@@ -729,12 +770,11 @@ ${contactLine}
             sameDate(start, prevDay) && start.getHours() >= 22;
           const overlapsEarly = start < six && end > zero;
           if (startsPrevLate && overlapsEarly) {
-            warnings.push({
-              type: "postNights",
-              text: `⚠ Warning: ${doc} is post-nights (${s.shiftName} on ${formatHumanDate(
+            warnings.push(
+              `⚠ Warning: ${doc} is post-nights (${s.shiftName} on ${formatHumanDate(
                 s.date
-              )})`,
-            });
+              )})`
+            );
           }
         }
       }
@@ -748,16 +788,24 @@ ${contactLine}
     return days;
   }, [groupDoctors, shifts]);
 
+  const filteredGetTogetherDays = useMemo(() => {
+    if (!hidePreNights) return getTogetherDays;
+    return getTogetherDays.filter(
+      (d) =>
+        !d.warnings.some((w) => w.toLowerCase().includes("pre-nights"))
+    );
+  }, [getTogetherDays, hidePreNights]);
+
   // ---------- Get-Together helpers: ICS + email ----------
 
-  function buildGroupEmailForDate(date: string, warnings: GetTogetherWarning[]) {
+  function buildGroupEmailForDate(date: string, warnings: string[]) {
     const dateLabel = formatHumanDate(date);
     const docList = groupDoctors.join(", ") || "group";
     let body = `Hi everyone,\n\nHere is a potential get-together evening for ${docList}:\n\n`;
     body += `  • ${dateLabel}\n\n`;
     if (warnings.length) {
       body += "Warnings:\n";
-      for (const w of warnings) body += `  • ${w.text.replace(/^⚠ /, "")}\n`;
+      for (const w of warnings) body += `  • ${w.replace(/^⚠ /, "")}\n`;
       body += "\n";
     }
     body +=
@@ -765,7 +813,7 @@ ${contactLine}
     return body;
   }
 
-  function handleEmailDateToGroup(date: string, warnings: GetTogetherWarning[]) {
+  function handleEmailDateToGroup(date: string, warnings: string[]) {
     const subject = encodeURIComponent(
       `Get-together evening option: ${formatHumanDate(date)}`
     );
@@ -824,7 +872,7 @@ ${contactLine}
     dateLabel: string;
     timeLabel: string;
     kind: "start" | "end"; // cluster type
-    startDate: Date; // representative time for ICS
+    start: Date;
     participants: {
       doctor: string;
       shiftName: string;
@@ -899,18 +947,13 @@ ${contactLine}
           }
         }
 
-        const docsInCluster = Array.from(byDoctor.keys());
-        if (docsInCluster.length < 2) continue;
-
-        // NEW: Require that ALL selected doctors are present in the cluster
-        if (docsInCluster.length !== periDoctors.length) continue;
-        const allIncluded = periDoctors.every((d) =>
-          docsInCluster.includes(d)
-        );
-        if (!allIncluded) continue;
+        // We only want clusters where *all* selected periDoctors are present
+        if (byDoctor.size < periDoctors.length) continue;
+        const hasAll = periDoctors.every((doc) => byDoctor.has(doc));
+        if (!hasAll) continue;
 
         const participantsNodes = Array.from(byDoctor.values());
-        const docsSorted = docsInCluster.slice().sort();
+        const docsSorted = Array.from(byDoctor.keys()).sort();
 
         const times = participantsNodes.map((n) => n.when.getTime());
         const minTime = Math.min(...times);
@@ -959,7 +1002,7 @@ ${contactLine}
           dateLabel,
           timeLabel,
           kind,
-          startDate: rep,
+          start: rep,
           participants,
         });
       }
@@ -1032,25 +1075,25 @@ ${contactLine}
   }
 
   function handleDownloadPeriIcs(event: PeriHangEvent) {
-    // 1-hour hang starting at the representative time
-    const start = event.startDate;
-    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    const start = event.start;
+    const end = new Date(start.getTime() + 60 * 60 * 1000); // 1-hour window
 
-    const dtStart = formatDateTimeForIcs(start);
-    const dtEnd = formatDateTimeForIcs(end);
+    const dtStart = formatIcsDateTime(start);
+    const dtEnd = formatIcsDateTime(end);
 
-    const summary = "Peri-shift hang";
-    const description =
-      buildPeriEmailBody(event)
-        .replace(/\r?\n/g, "\\n")
-        .slice(0, 2000) || "Peri-shift hang opportunity.";
+    const who = event.participants.map((p) => p.doctor).join(", ");
+    const summary = `Peri-shift hang (${who})`;
+    const description = buildPeriEmailBody(event).replace(/\n/g, "\\n");
 
     const ics = [
       "BEGIN:VCALENDAR",
       "VERSION:2.0",
       "PRODID:-//Metri-Manager//PeriShiftHang//EN",
       "BEGIN:VEVENT",
-      `UID:peri-hang-${event.dateKey}-${event.timeLabel.replace(/[^0-9]/g, "")}@metri-manager`,
+      `UID:peri-hang-${event.dateKey}-${event.timeLabel.replace(
+        /[^0-9]/g,
+        ""
+      )}@metri-manager`,
       `DTSTAMP:${dtStart}Z`,
       `DTSTART:${dtStart}`,
       `DTEND:${dtEnd}`,
@@ -1168,12 +1211,6 @@ ${contactLine}
 
   // ---------- MAIN RENDER ----------
 
-  const handleNavToTradeFishing = () => {
-    if (typeof window !== "undefined") {
-      window.location.href = "/trade_fishing";
-    }
-  };
-
   return (
     <main style={{ maxWidth: 800, margin: "0 auto", padding: "1rem" }}>
       <h1>Metri-Manager</h1>
@@ -1186,7 +1223,7 @@ ${contactLine}
       <div style={{ marginBottom: "1rem" }}>
         <button
           type="button"
-          onClick={() => setMode("sameDay")}
+          onClick={() => handleModeChange("sameDay")}
           style={{
             padding: "0.5rem 1rem",
             marginRight: "0.5rem",
@@ -1200,7 +1237,7 @@ ${contactLine}
         </button>
         <button
           type="button"
-          onClick={() => setMode("getTogether")}
+          onClick={() => handleModeChange("getTogether")}
           style={{
             padding: "0.5rem 1rem",
             marginRight: "0.5rem",
@@ -1214,7 +1251,7 @@ ${contactLine}
         </button>
         <button
           type="button"
-          onClick={() => setMode("periHang")}
+          onClick={() => handleModeChange("periHang")}
           style={{
             padding: "0.5rem 1rem",
             marginRight: "0.5rem",
@@ -1639,92 +1676,72 @@ ${contactLine}
             })}
           </div>
 
+          <div style={{ marginBottom: "0.75rem" }}>
+            <label style={{ fontSize: "0.9rem" }}>
+              <input
+                type="checkbox"
+                checked={hidePreNights}
+                onChange={(e) => setHidePreNights(e.target.checked)}
+              />{" "}
+              Hide dates that include a <strong>pre-nights</strong> warning
+            </label>
+          </div>
+
           {groupDoctors.length === 0 && (
             <p>Select one or more doctors to see potential evenings.</p>
           )}
 
-          {groupDoctors.length > 0 && getTogetherDays.length === 0 && (
+          {groupDoctors.length > 0 && filteredGetTogetherDays.length === 0 && (
             <p>No suitable future evenings found in the schedule.</p>
           )}
 
-          {groupDoctors.length > 0 && getTogetherDays.length > 0 && (
+          {groupDoctors.length > 0 && filteredGetTogetherDays.length > 0 && (
             <>
-              <div style={{ marginBottom: "0.5rem" }}>
-                <label style={{ fontSize: "0.9rem" }}>
-                  <input
-                    type="checkbox"
-                    checked={hidePreNights}
-                    onChange={(e) => setHidePreNights(e.target.checked)}
-                  />{" "}
-                  Hide evenings that include pre-nights warnings
-                </label>
-              </div>
-
               <h3>Potential Get-Together Evenings</h3>
-              {(() => {
-                const visibleDays = hidePreNights
-                  ? getTogetherDays.filter(
-                      (d) =>
-                        !d.warnings.some((w) => w.type === "preNights")
-                    )
-                  : getTogetherDays;
-
-                if (visibleDays.length === 0) {
-                  return (
-                    <p>
-                      No evenings remain after filtering out pre-nights
-                      warnings.
-                    </p>
-                  );
-                }
-
-                return visibleDays.map((d) => (
-                  <div
-                    key={d.date}
-                    style={{
-                      borderTop: "1px solid #eee",
-                      paddingTop: "0.5rem",
-                      marginTop: "0.5rem",
-                    }}
-                  >
-                    <strong>{formatHumanDate(d.date)}</strong>
-                    <div style={{ marginTop: "0.25rem" }}>
-                      {d.warnings.map((w, i) => (
-                        <div
-                          key={i}
-                          style={{ color: "#b45309", fontSize: "0.9rem" }}
-                        >
-                          {w.text}
-                        </div>
-                      ))}
-                      {d.warnings.length === 0 && (
-                        <div
-                          style={{ fontSize: "0.9rem", color: "#16a34a" }}
-                        >
-                          No warnings.
-                        </div>
-                      )}
-                    </div>
-                    <div style={{ marginTop: "0.25rem" }}>
-                      <button
-                        type="button"
-                        onClick={() => handleDownloadIcs(d.date)}
-                        style={{ marginRight: "0.5rem" }}
+              {filteredGetTogetherDays.map((d) => (
+                <div
+                  key={d.date}
+                  style={{
+                    borderTop: "1px solid #eee",
+                    paddingTop: "0.5rem",
+                    marginTop: "0.5rem",
+                  }}
+                >
+                  <strong>{formatHumanDate(d.date)}</strong>
+                  <div style={{ marginTop: "0.25rem" }}>
+                    {d.warnings.map((w, i) => (
+                      <div
+                        key={i}
+                        style={{ color: "#b45309", fontSize: "0.9rem" }}
                       >
-                        Download .ics
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleEmailDateToGroup(d.date, d.warnings)
-                        }
-                      >
-                        Email this date to group
-                      </button>
-                    </div>
+                        {w}
+                      </div>
+                    ))}
+                    {d.warnings.length === 0 && (
+                      <div style={{ fontSize: "0.9rem", color: "#16a34a" }}>
+                        No warnings.
+                      </div>
+                    )}
                   </div>
-                ));
-              })()}
+                  <div style={{ marginTop: "0.25rem" }}>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadIcs(d.date)}
+                      style={{ marginRight: "0.5rem" }}
+                    >
+                      Download .ics
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleEmailDateToGroup(d.date, d.warnings)
+                      }
+                    >
+                      Email this date to group
+                    </button>
+                  </div>
+                </div>
+              ))}
             </>
           )}
         </section>
@@ -1812,7 +1829,10 @@ ${contactLine}
                 >
                   <strong>{evt.dateLabel}</strong>{" "}
                   <span style={{ fontSize: "0.9rem", color: "#555" }}>
-                    – {evt.kind === "start" ? "Starting around" : "Ending around"}{" "}
+                    –{" "}
+                    {evt.kind === "start"
+                      ? "Starting around"
+                      : "Ending around"}{" "}
                     {evt.timeLabel}
                   </span>
                   <ul style={{ marginTop: "0.25rem", paddingLeft: "1.25rem" }}>
@@ -1826,13 +1846,6 @@ ${contactLine}
                   <div style={{ marginTop: "0.25rem" }}>
                     <button
                       type="button"
-                      onClick={() => handleDownloadPeriIcs(evt)}
-                      style={{ marginRight: "0.5rem" }}
-                    >
-                      Download .ics
-                    </button>
-                    <button
-                      type="button"
                       onClick={() => handleEmailPeriEvent(evt)}
                       style={{ marginRight: "0.5rem" }}
                     >
@@ -1841,8 +1854,15 @@ ${contactLine}
                     <button
                       type="button"
                       onClick={() => handleCopyPeriSms(evt)}
+                      style={{ marginRight: "0.5rem" }}
                     >
                       Copy text for SMS / chat
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadPeriIcs(evt)}
+                    >
+                      Download .ics
                     </button>
                   </div>
                 </div>
