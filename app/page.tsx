@@ -1020,7 +1020,7 @@ ${contactLine}
             borderRadius: 12,
             background: "#111827",
             boxShadow: "0 10px 25px rgba(0,0,0,0.4)",
-            border: "1px solid "#374151",
+            border: "1px solid #374151",   // <-- fixed
           }}
         >
           <h1 style={{ marginBottom: "0.5rem" }}>Metri-Manager</h1>
@@ -1172,7 +1172,7 @@ ${contactLine}
       {mode === "sameDay" && (
         <section
           style={{
-            border: "1px solid "#ccc",
+            border: "1px solid #ccc",   // <-- fixed
             padding: "1rem",
             borderRadius: "0.5rem",
           }}
