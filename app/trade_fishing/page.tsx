@@ -36,7 +36,18 @@ type AnalyzedCandidate = {
   theirShort: boolean;
 };
 
+type UsageMode = "sameDay" | "getTogether" | "periHang" | "tradeFishing";
+
+type ModeUsageEvent = {
+  id: string;
+  mode: UsageMode;
+  timestamp: string;
+  doctorName?: string;
+  extra?: string;
+};
+
 const CONTACTS_STORAGE_KEY = "metriManagerContacts";
+const USAGE_LOG_KEY = "metriManagerUsageLog";
 
 // ---------- Time helpers ----------
 
@@ -369,6 +380,24 @@ function analyzeCandidate(
   };
 }
 
+// ---------- Metrics helpers ----------
+
+function makeId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function logModeUsage(event: ModeUsageEvent) {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(USAGE_LOG_KEY);
+    const arr = raw ? (JSON.parse(raw) as ModeUsageEvent[]) : [];
+    arr.push(event);
+    window.localStorage.setItem(USAGE_LOG_KEY, JSON.stringify(arr));
+  } catch {
+    // ignore
+  }
+}
+
 // ---------- Main component ----------
 
 export default function TradeFishingPage() {
@@ -409,6 +438,14 @@ export default function TradeFishingPage() {
           `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`)
         );
         setScheduleShifts(sorted);
+
+        // Log that Trade Fishing was opened successfully
+        logModeUsage({
+          id: makeId(),
+          mode: "tradeFishing",
+          timestamp: new Date().toISOString(),
+          extra: "open",
+        });
       })
       .catch(() => setScheduleError("Could not load schedule."));
   }, []);
@@ -571,6 +608,15 @@ export default function TradeFishingPage() {
         setXlsxError(
           "Parsed 0 future shifts from this file. The layout or date range may be different than expected."
         );
+      } else {
+        // Log successful XLSX upload parsing
+        logModeUsage({
+          id: makeId(),
+          mode: "tradeFishing",
+          timestamp: new Date().toISOString(),
+          doctorName: selectedDoctor || undefined,
+          extra: "xlsx-upload",
+        });
       }
     } catch (err) {
       console.error(err);
@@ -715,15 +761,48 @@ export default function TradeFishingPage() {
     );
   };
 
+  const handleBack = () => {
+    if (typeof window !== "undefined") {
+      window.location.href = "/";
+    }
+  };
+
   // ---------- JSX ----------
 
   return (
     <main style={{ maxWidth: 1000, margin: "0 auto", padding: "1rem" }}>
-      <h1>Trade Fishing (Marketplace Prototype)</h1>
-      <p style={{ maxWidth: 800 }}>
-        Follow the instructions below and I&apos;ll help you find the best possible
-        trade from all available marketplace shifts.
-      </p>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: "0.75rem",
+          marginBottom: "0.75rem",
+        }}
+      >
+        <div>
+          <h1>Trade Fishing (Marketplace Prototype)</h1>
+          <p style={{ maxWidth: 800 }}>
+            Follow the instructions below and I&apos;ll help you find the best possible
+            trade from all available marketplace shifts.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={handleBack}
+          style={{
+            padding: "0.4rem 0.8rem",
+            borderRadius: "999px",
+            border: "1px solid #333",
+            background: "#fff",
+            cursor: "pointer",
+            fontSize: "0.85rem",
+            whiteSpace: "nowrap",
+          }}
+        >
+          ← Back to Metri-Manager
+        </button>
+      </div>
 
       {scheduleError && (
         <p style={{ color: "red" }}>Schedule error: {scheduleError}</p>
@@ -942,7 +1021,11 @@ export default function TradeFishingPage() {
           matches, eliminate overlapping shifts, and warn you about short
           turnarounds. For instructions on how to create and download your
           MetricAid Excel Marketplace document click{" "}
-          <a href="" onClick={(e) => e.preventDefault()}>
+          <a
+            href="https://youtu.be/IgbLhb0BgFc"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             here
           </a>
           .
@@ -1010,7 +1093,20 @@ export default function TradeFishingPage() {
               </p>
               <select
                 value={selectedMyShiftIndex}
-                onChange={(e) => setSelectedMyShiftIndex(e.target.value)}
+                onChange={(e) => {
+                  setSelectedMyShiftIndex(e.target.value);
+
+                  // Log that a user chose a shift to fish with
+                  if (e.target.value !== "") {
+                    logModeUsage({
+                      id: makeId(),
+                      mode: "tradeFishing",
+                      timestamp: new Date().toISOString(),
+                      doctorName: selectedDoctor || undefined,
+                      extra: "choose-shift",
+                    });
+                  }
+                }}
                 style={{ width: "100%", maxWidth: 500, padding: "0.5rem" }}
               >
                 <option value="">-- Choose your shift --</option>
