@@ -4,206 +4,182 @@ import React, { useEffect, useMemo, useState } from "react";
 
 type UsageMode = "sameDay" | "getTogether" | "periHang" | "tradeFishing";
 
-type ModeUsageDetails = {
-  selectedDoctor?: string;
-  groupDoctors?: string[];
-  periDoctors?: string[];
-};
-
 type ModeUsageEvent = {
+  id: string;
   mode: UsageMode;
-  timestamp: string; // ISO
-  details?: ModeUsageDetails;
+  timestamp: string;
+  doctorName?: string;
+  extra?: string;
 };
 
-const USAGE_STORAGE_KEY = "metriManagerModeUsage";
-
-function formatTimestamp(ts: string) {
-  const d = new Date(ts);
-  if (isNaN(d.getTime())) return ts;
-  return d.toLocaleString();
-}
-
-function describeDetails(e: ModeUsageEvent): string {
-  const parts: string[] = [];
-
-  if (e.details?.selectedDoctor) {
-    parts.push(`Dr. ${e.details.selectedDoctor}`);
-  }
-  if (e.details?.groupDoctors?.length) {
-    parts.push(`Group: ${e.details.groupDoctors.join(", ")}`);
-  }
-  if (e.details?.periDoctors?.length) {
-    parts.push(`Peri group: ${e.details.periDoctors.join(", ")}`);
-  }
-
-  return parts.join(" | ") || "N/A";
-}
+const USAGE_LOG_KEY = "metriManagerUsageLog";
 
 export default function MetricsPage() {
   const [events, setEvents] = useState<ModeUsageEvent[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
+  // Load from localStorage once on mount
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      const raw = window.localStorage.getItem(USAGE_STORAGE_KEY);
-      const parsed: ModeUsageEvent[] = raw ? JSON.parse(raw) : [];
-      setEvents(parsed);
-    } catch {
+      const raw = window.localStorage.getItem(USAGE_LOG_KEY);
+      if (!raw) {
+        setEvents([]);
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setEvents(parsed);
+      } else {
+        setEvents([]);
+      }
+    } catch (e) {
+      console.error("Failed to read usage log", e);
+      setError("Could not read usage log from this browser.");
       setEvents([]);
     }
   }, []);
 
-  const counts = useMemo(() => {
-    const base: Record<UsageMode, number> = {
+  const totals = useMemo(() => {
+    const base = {
       sameDay: 0,
       getTogether: 0,
       periHang: 0,
       tradeFishing: 0,
-    };
-    for (const e of events) {
-      base[e.mode] = (base[e.mode] || 0) + 1;
+    } as Record<UsageMode, number>;
+
+    for (const ev of events) {
+      if (ev.mode in base) {
+        base[ev.mode as UsageMode] += 1;
+      }
     }
     return base;
   }, [events]);
 
-  const sortedEvents = useMemo(
-    () =>
-      [...events].sort(
-        (a, b) =>
-          new Date(b.timestamp).getTime() -
-          new Date(a.timestamp).getTime()
-      ),
-    [events]
-  );
+  const totalEvents = events.length;
 
-  const handleClear = () => {
-    if (typeof window === "undefined") return;
-    const ok = window.confirm(
-      "Clear all Metri-Manager usage data on this browser?"
+  // Show most recent 50 events (newest first)
+  const recentEvents = useMemo(() => {
+    const sorted = [...events].sort(
+      (a, b) =>
+        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
-    if (!ok) return;
-    window.localStorage.removeItem(USAGE_STORAGE_KEY);
-    setEvents([]);
-  };
-
-  const handleBackHome = () => {
-    if (typeof window !== "undefined") {
-      window.location.href = "/";
-    }
-  };
+    return sorted.slice(-50).reverse();
+  }, [events]);
 
   return (
     <main style={{ maxWidth: 900, margin: "0 auto", padding: "1rem" }}>
       <h1>Metri-Manager – Usage Metrics</h1>
-      <p style={{ marginBottom: "0.5rem" }}>
-        Local statistics for this browser. For system-wide analytics you’d
-        wire these events into a backend instead of localStorage.
+      <p style={{ maxWidth: 700, fontSize: "0.9rem", color: "#555" }}>
+        These metrics are based on{" "}
+        <strong>localStorage in this browser only</strong>. They do not merge
+        across devices or users yet. If you open this page on another computer
+        or browser, you&apos;ll see a different (often empty) log.
       </p>
 
-      <div style={{ marginBottom: "1rem" }}>
-        <button
-          type="button"
-          onClick={handleBackHome}
-          style={{
-            padding: "0.4rem 0.8rem",
-            marginRight: "0.5rem",
-            borderRadius: "999px",
-            border: "1px solid #333",
-            background: "#fff",
-            cursor: "pointer",
-          }}
-        >
-          ← Back to Metri-Manager
-        </button>
-        <button
-          type="button"
-          onClick={handleClear}
-          style={{
-            padding: "0.4rem 0.8rem",
-            borderRadius: "999px",
-            border: "1px solid #b91c1c",
-            background: "#fee2e2",
-            color: "#991b1b",
-            cursor: "pointer",
-          }}
-        >
-          Clear local log
-        </button>
-      </div>
+      {error && (
+        <p style={{ color: "red", marginTop: "0.5rem" }}>{error}</p>
+      )}
 
-      {/* Summary counts */}
       <section
         style={{
-          border: "1px solid #ccc",
+          border: "1px solid #ddd",
+          borderRadius: 8,
           padding: "1rem",
-          borderRadius: "0.5rem",
-          marginBottom: "1rem",
+          marginTop: "1rem",
         }}
       >
-        <h2>Mode Usage Counts</h2>
-        <table
-          border={1}
-          cellPadding={6}
-          style={{ borderCollapse: "collapse", minWidth: 300 }}
-        >
-          <thead>
-            <tr>
-              <th>Mode</th>
-              <th>Count</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Same-Day Trades</td>
-              <td>{counts.sameDay}</td>
-            </tr>
-            <tr>
-              <td>Get Together</td>
-              <td>{counts.getTogether}</td>
-            </tr>
-            <tr>
-              <td>Peri-Shift Hang</td>
-              <td>{counts.periHang}</td>
-            </tr>
-            <tr>
-              <td>Trade Fishing</td>
-              <td>{counts.tradeFishing}</td>
-            </tr>
-          </tbody>
-        </table>
+        <h2>Mode usage counts</h2>
+        <p style={{ fontSize: "0.9rem", color: "#555" }}>
+          Total logged events in this browser:{" "}
+          <strong>{totalEvents}</strong>
+        </p>
+        <div style={{ overflowX: "auto" }}>
+          <table
+            border={1}
+            cellPadding={6}
+            style={{
+              borderCollapse: "collapse",
+              minWidth: 400,
+              marginTop: "0.5rem",
+            }}
+          >
+            <thead>
+              <tr>
+                <th>Mode</th>
+                <th>Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Same-Day Trades</td>
+                <td>{totals.sameDay}</td>
+              </tr>
+              <tr>
+                <td>Get Together</td>
+                <td>{totals.getTogether}</td>
+              </tr>
+              <tr>
+                <td>Peri-Shift Hang</td>
+                <td>{totals.periHang}</td>
+              </tr>
+              <tr>
+                <td>Trade Fishing</td>
+                <td>{totals.tradeFishing}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </section>
 
-      {/* Detailed log */}
       <section
         style={{
-          border: "1px solid #ccc",
+          border: "1px solid #ddd",
+          borderRadius: 8,
           padding: "1rem",
-          borderRadius: "0.5rem",
+          marginTop: "1rem",
+          marginBottom: "2rem",
         }}
       >
-        <h2>Usage Log</h2>
-        {sortedEvents.length === 0 && <p>No events logged yet.</p>}
-        {sortedEvents.length > 0 && (
-          <div style={{ maxHeight: 400, overflowY: "auto" }}>
+        <h2>Recent events (this browser)</h2>
+        {recentEvents.length === 0 && (
+          <p style={{ fontSize: "0.9rem", color: "#555" }}>
+            No events logged yet in this browser. Try using Same-Day Trades,
+            Get Together, Peri-Shift Hang, or Trade Fishing, then reload this
+            page.
+          </p>
+        )}
+        {recentEvents.length > 0 && (
+          <div style={{ overflowX: "auto" }}>
             <table
               border={1}
               cellPadding={6}
-              style={{ borderCollapse: "collapse", minWidth: 600 }}
+              style={{
+                borderCollapse: "collapse",
+                minWidth: 600,
+                marginTop: "0.5rem",
+              }}
             >
               <thead>
                 <tr>
                   <th>Time</th>
                   <th>Mode</th>
-                  <th>Who / Context</th>
+                  <th>Doctor (if recorded)</th>
+                  <th>Extra</th>
                 </tr>
               </thead>
               <tbody>
-                {sortedEvents.map((e, idx) => (
-                  <tr key={idx}>
-                    <td>{formatTimestamp(e.timestamp)}</td>
-                    <td>{e.mode}</td>
-                    <td>{describeDetails(e)}</td>
+                {recentEvents.map((ev) => (
+                  <tr key={ev.id}>
+                    <td>
+                      {new Date(ev.timestamp).toLocaleString(undefined, {
+                        dateStyle: "short",
+                        timeStyle: "medium",
+                      })}
+                    </td>
+                    <td>{ev.mode}</td>
+                    <td>{ev.doctorName || "—"}</td>
+                    <td>{ev.extra || "—"}</td>
                   </tr>
                 ))}
               </tbody>
